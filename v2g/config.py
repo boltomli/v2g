@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Video extraction
     max_duration: int = 120  # seconds
     frame_count: int = 16
+    video_max_mb: int = 20  # max video size (MB) for direct upload to LLM
 
     # Output
     output_root: Path = Path("projects")

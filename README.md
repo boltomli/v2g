@@ -7,20 +7,24 @@ Transform any video into a playable Godot 4.x game using LLM-powered analysis.
 ```
 Video (file/URL)
     │
-    ▼
-┌──────────────┐    ┌───────────────┐    ┌──────────────────┐
-│  Frame        │───▶│  LLM Video    │───▶│  Godot Project   │
-│  Extraction   │    │  Analysis     │    │  Generation      │
-│  (ffmpeg/     │    │  (multimodal) │    │  (templates +    │
-│   yt-dlp)     │    │               │    │   LLM scripts)   │
-└──────────────┘    └───────────────┘    └──────────────────┘
-                                                  │
-                                                  ▼
-                                          Playable .godot project
+    ├─ Fast mode: ffmpeg extracts keyframes ─┐
+    │                                         ▼
+    └─ Detail mode (-d): full video ───▶ LLM Analysis ──▶ Godot Project
+                                         (multimodal)      (templates +
+                                                           LLM scripts)
 ```
 
-1. **Extract** — Samples keyframes from a local video or URL (yt-dlp + ffmpeg).
-2. **Analyze** — Sends frames to a multimodal LLM; returns a structured game design (genre, mechanics, objects, levels, controls).
+Two analysis modes:
+
+| | Fast (default) | Detail (`-d`) |
+|---|---|---|
+| Input | 16 keyframe images | Full video file |
+| Requires | Any vision model | Video-capable model |
+| Output fields | Core design | + physics, behavior, layout, progression |
+| Cost / speed | Lower / faster | Higher / slower |
+
+1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg).
+2. **Analyze** — Sends to multimodal LLM; returns a structured game design.
 3. **Generate** — Scaffolds a Godot 4.x project: `project.godot`, scenes, player/enemy scripts, and LLM-generated extras.
 
 ## Prerequisites
@@ -34,21 +38,25 @@ Video (file/URL)
 ## Setup
 
 ```bash
-pip install -e .
+git clone <repo> && cd v2g
+uv sync
 cp .env.example .env   # fill in V2G_LLM_API_KEY
 ```
 
 ## Usage
 
 ```bash
-# From a local video
-v2g ./gameplay.mp4
+# Fast mode — extract keyframes
+uv run v2g ./gameplay.mp4
+
+# Detail mode — send full video to video-capable LLM
+uv run v2g ./gameplay.mp4 -d
 
 # From a URL
-v2g "https://www.youtube.com/watch?v=..."
+uv run v2g "https://www.youtube.com/watch?v=..."
 
 # Custom output directory
-v2g ./clip.mp4 -o ./my_game
+uv run v2g ./clip.mp4 -o ./my_game
 ```
 
 Then open the generated project in Godot:
@@ -67,8 +75,9 @@ All settings via environment variables (or `.env` file):
 | `V2G_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `V2G_LLM_MODEL` | `gpt-4o` | Model name |
 | `V2G_GODOT_PATH` | `godot` | Godot executable |
-| `V2G_MAX_DURATION` | `120` | Max video seconds to process |
-| `V2G_FRAME_COUNT` | `16` | Keyframes to extract |
+| `V2G_MAX_DURATION` | `120` | Max video seconds (detail mode) |
+| `V2G_FRAME_COUNT` | `16` | Keyframes to extract (fast mode) |
+| `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB (detail mode) |
 
 ## Project Structure
 

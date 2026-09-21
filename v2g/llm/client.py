@@ -1,6 +1,7 @@
 """Thin wrapper around the OpenAI-compatible chat completions API."""
 
 import base64
+import mimetypes
 from pathlib import Path
 
 from openai import OpenAI
@@ -18,10 +19,27 @@ def _get_client() -> OpenAI:
     return _client
 
 
-def _image_to_data_url(path: Path) -> str:
+def _to_data_url(path: Path) -> str:
+    """Convert a file to a base64 data URL with the correct MIME type."""
     data = path.read_bytes()
+    mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     b64 = base64.b64encode(data).decode()
-    return f"data:image/png;base64,{b64}"
+    return f"data:{mime};base64,{b64}"
+
+
+def _file_to_content(path: Path) -> dict:
+    """Build the appropriate content block for an image or video file."""
+    suffix = path.suffix.lower()
+    if suffix in (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"):
+        return {
+            "type": "video_url",
+            "video_url": {"url": _to_data_url(path)},
+        }
+    # Default to image
+    return {
+        "type": "image_url",
+        "image_url": {"url": _to_data_url(path), "detail": "low"},
+    }
 
 
 def chat(
@@ -31,14 +49,15 @@ def chat(
     max_tokens: int = 8192,
     temperature: float = 0.4,
 ) -> str:
-    """Send a multimodal chat request. String parts are text; Path parts are images."""
+    """Send a multimodal chat request.
+
+    - str parts → text content
+    - Path parts → image or video content (auto-detected by extension)
+    """
     content: list[dict] = []
     for part in user_parts:
         if isinstance(part, Path):
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": _image_to_data_url(part), "detail": "low"},
-            })
+            content.append(_file_to_content(part))
         else:
             content.append({"type": "text", "text": part})
 
