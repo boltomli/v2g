@@ -29,6 +29,12 @@ def main(argv: list[str] | None = None) -> None:
         default=False,
         help="Detailed mode: send full video to LLM for deep analysis (requires video-capable model)",
     )
+    parser.add_argument(
+        "-i", "--instruct",
+        type=str,
+        default=None,
+        help="Optional style instruction, e.g. 'change to medieval', 'vampire theme', 'Lord of the Rings style'",
+    )
     parser.add_argument("--version", action="version", version=f"v2g {__version__}")
     args = parser.parse_args(argv)
 
@@ -36,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         from v2g.pipeline import run
-        project_path = run(args.source, args.output, detailed=args.detail)
+        project_path = run(args.source, args.output, detailed=args.detail, instruct=args.instruct)
         console.print(f"\n[bold green]Done![/] Open the project in Godot 4.x:\n  godot --editor {project_path}")
     except FileNotFoundError as e:
         console.print(f"[bold red]Error:[/] {e}")

@@ -8,7 +8,6 @@ from openai import OpenAI
 
 from v2g.config import settings
 
-
 _client: OpenAI | None = None
 
 

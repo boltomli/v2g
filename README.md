@@ -18,7 +18,7 @@ Two analysis modes:
 
 | | Fast (default) | Detail (`-d`) |
 |---|---|---|
-| Input | 16 keyframe images | Full video file |
+| Input | Keyframe images (1 per 2s) | Full video file |
 | Requires | Any vision model | Video-capable model |
 | Output fields | Core design | + physics, behavior, layout, progression |
 | Cost / speed | Lower / faster | Higher / slower |
