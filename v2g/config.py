@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # Video extraction
     max_duration: int = 120  # seconds
-    frame_count: int = 16
+    frame_interval: float = 2.0  # seconds between extracted frames
     video_max_mb: int = 20  # max video size (MB) for direct upload to LLM
 
     # Output

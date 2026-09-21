@@ -58,17 +58,17 @@ def _get_duration(video_path: Path) -> float:
     return float(result.stdout.strip())
 
 
-def extract_frames(video_path: Path, out_dir: Path, count: int) -> list[Path]:
-    """Extract *count* evenly-spaced keyframes from *video_path* into *out_dir*."""
+def extract_frames(video_path: Path, out_dir: Path, interval: float = 2.0) -> list[Path]:
+    """Extract one frame every *interval* seconds from *video_path* into *out_dir*."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    fps = 1.0 / interval
     subprocess.run(
         [
             "ffmpeg", "-y",
             "-i", str(video_path),
-            "-vf", f"select='not(mod(n\\,max(1,floor(n_total/{count}))))',setpts=N/FRAME_RATE/TB",
+            "-vf", f"fps={fps}",
             "-vsync", "vfr",
-            "-frames:v", str(count),
-            str(out_dir / "frame_%03d.png"),
+            str(out_dir / "frame_%04d.png"),
         ],
         check=True,
         capture_output=True,
@@ -120,7 +120,7 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
 
 def extract(source: str) -> list[Path]:
     """Return a list of frame image paths extracted from *source* (local path or URL)."""
-    count = settings.frame_count
+    interval = settings.frame_interval
     video_path, tmp = resolve_source(source)
     frames_dir = tmp / "frames"
-    return extract_frames(video_path, frames_dir, count)
+    return extract_frames(video_path, frames_dir, interval)

@@ -50,7 +50,7 @@ All via env vars or `.env`:
 | `V2G_LLM_MODEL` | `gpt-4o` | Model name |
 | `V2G_GODOT_PATH` | `godot` | Godot executable path |
 | `V2G_MAX_DURATION` | `120` | Max video seconds (detail mode) |
-| `V2G_FRAME_COUNT` | `16` | Keyframes to extract (fast mode) |
+| `V2G_FRAME_INTERVAL` | `2.0` | Seconds between extracted frames (fast mode) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB (detail mode) |
 
 ## GameDesign Schema
