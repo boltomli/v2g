@@ -8,6 +8,7 @@ from rich.panel import Panel
 from v2g.config import settings
 from v2g.godot.generator import generate
 from v2g.llm.analyzer import GameDesign, analyze, analyze_video, analyze_video_chunked
+from v2g.video.dialogue import TranscriptLine, extract_dialogue, format_transcript
 from v2g.video.extractor import prepare_video_for_upload, resolve_source, split_video
 
 console = Console()
@@ -49,6 +50,13 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
     # Resolve video source once (avoid double download for URLs)
     source_video, _tmp = resolve_source(source)
 
+    # ── Source-language dialogue: subtitles are the only authoritative source ──
+    transcript_lines: list[TranscriptLine] = extract_dialogue(source_video)
+    if transcript_lines:
+        console.print(f"[bold cyan]▶ Transcript:[/] {len(transcript_lines)} subtitle lines from source video")
+    else:
+        console.print("[yellow]▶ No subtitles found — source-language lines will be left empty[/]")
+
     if detailed:
         # ── Detailed mode: send full video to LLM ────────────────────────
         from v2g.video.extractor import _get_duration
@@ -64,7 +72,9 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
             console.print(f"  Split into {len(segments)} segments")
 
             console.print("[bold cyan]▶ Analyzing video segments with LLM (detailed)...[/]")
-            design = analyze_video_chunked(segments, instruct=instruct)
+            design = analyze_video_chunked(
+                segments, instruct=instruct, transcript=transcript_lines
+            )
         else:
             # Short enough: single upload
             console.print("[bold cyan]▶ Preparing video for detailed analysis...[/]")
@@ -73,7 +83,11 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
             console.print(f"  Video ready ({size_mb:.1f} MB)")
 
             console.print("[bold cyan]▶ Analyzing video with LLM (detailed)...[/]")
-            design = analyze_video(upload_path, instruct=instruct)
+            design = analyze_video(
+                upload_path,
+                instruct=instruct,
+                transcript=format_transcript(transcript_lines) or None,
+            )
     else:
         # ── Fast mode: extract keyframes ──────────────────────────────────
         from v2g.video.extractor import extract as smart_extract
@@ -83,7 +97,11 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
         console.print(f"  Extracted {len(frames)} frames")
 
         console.print("[bold cyan]▶ Analyzing video with LLM...[/]")
-        design = analyze(frames, instruct=instruct)
+        design = analyze(
+            frames,
+            instruct=instruct,
+            transcript=format_transcript(transcript_lines) or None,
+        )
 
     _print_design(design, instruct)
 

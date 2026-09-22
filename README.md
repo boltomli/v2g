@@ -7,12 +7,22 @@ Transform any video into a playable Godot 4.x game using LLM-powered analysis.
 ```
 Video (file/URL)
     │
+    ├─ Subtitles → transcript (source-language dialogue, authoritative)
     ├─ Fast mode: ffmpeg extracts keyframes ─┐
     │                                         ▼
-    └─ Detail mode (-d): full video ───▶ LLM Analysis ──▶ Godot Project
-                                         (multimodal)      (templates +
-                                                           LLM scripts)
+    └─ Detail mode (-d): full video ───▶ LLM Analysis ──▶ Visual Novel Project
+                                         (multimodal)      (bilingual VN:
+                                                            source line +
+                                                            Chinese subtitle)
 ```
+
+Key properties of generated games:
+
+- **Visual novel**: dialogue flow, choice options, reputation score — input is
+  Space/Enter/click only (`vn_manager.gd` runtime, template-owned).
+- **Bilingual text**: every line shows the verbatim source-language transcript
+  plus a Simplified Chinese subtitle; narration and UI are Chinese-only.
+  Source-language text is extracted from the video's subtitles — never invented.
 
 Two analysis modes:
 
@@ -23,9 +33,9 @@ Two analysis modes:
 | Output fields | Core design | + physics, behavior, layout, progression |
 | Cost / speed | Lower / faster | Higher / slower |
 
-1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg).
-2. **Analyze** — Sends to multimodal LLM; returns a structured game design.
-3. **Generate** — Scaffolds a Godot 4.x project: `project.godot`, scenes, player/enemy scripts, and LLM-generated extras.
+1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg); pulls subtitles (sidecar or embedded) as the source-language transcript.
+2. **Analyze** — Sends to multimodal LLM with the transcript injected; returns a structured game design with bilingual dialogue.
+3. **Generate** — Scaffolds a visual-novel Godot 4.x project (`project.godot`, `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`), then runs Godot headless to import assets and self-check.
 
 ## Prerequisites
 
@@ -87,12 +97,15 @@ v2g/
 │   ├── __main__.py         # CLI
 │   ├── config.py            # settings
 │   ├── pipeline.py          # orchestrator
-│   ├── video/extractor.py   # frame extraction
+│   ├── video/
+│   │   ├── extractor.py     # frame extraction (+ subtitle download for URLs)
+│   │   ├── dialogue.py      # subtitle transcript extraction (source language)
+│   │   └── asset_extractor.py  # seeded, hash-deduplicated asset frames
 │   ├── llm/
 │   │   ├── client.py        # OpenAI API wrapper
-│   │   └── analyzer.py      # frames → game design
+│   │   └── analyzer.py      # frames/video → bilingual game design
 │   └── godot/
-│       ├── generator.py     # project scaffolding
-│       └── templates.py     # GDScript + scene templates
+│       ├── generator.py     # project scaffolding + Godot self-check
+│       └── templates.py     # VN scene, vn_manager story runtime, prompts
 └── projects/                # generated games
 ```

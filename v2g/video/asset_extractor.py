@@ -8,8 +8,10 @@ Uses ffmpeg to:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import subprocess
+import zlib
 from pathlib import Path
 
 from v2g.llm.analyzer import GameDesign
@@ -95,20 +97,86 @@ def _crop_image(src: Path, dst: Path, region: tuple[float, float, float, float])
     return dst
 
 
-def _timestamps_for_entity(duration: float, count: int = 3) -> list[float]:
-    """Return *count* evenly-spaced timestamps avoiding the very start/end."""
+def _file_hash(path: Path) -> str:
+    """SHA-256 of a file's bytes — used to prove two assets are not identical."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _timestamps_for_entity(duration: float, count: int = 3, seed: int = 0) -> list[float]:
+    """Return *count* evenly-spaced timestamps inside a *seed*-selected window.
+
+    Each entity gets a 40%-of-timeline window offset by its seed, so different
+    entities sample different moments. A shared schedule made every character
+    sprite a byte-identical frame (the duplicate-asset bug).
+    """
     if duration <= 1.0:
         return [duration / 2]
-    # Spread across 10%..90% of the video
-    start = duration * 0.1
-    end = duration * 0.9
+    # Full working range: 10%..90% of the video
+    full_start = duration * 0.1
+    full = duration * 0.8
+    window = full * 0.4
+    offset = ((seed % 1000) / 1000.0) * (full - window)
+    start = full_start + offset
     if count == 1:
-        return [(start + end) / 2]
-    step = (end - start) / (count - 1)
+        return [start + window / 2]
+    step = window / (count - 1)
     return [start + i * step for i in range(count)]
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
+
+def _capture_distinct(
+    video_path: Path,
+    duration: float,
+    out_dir: Path,
+    final: Path,
+    *,
+    seed: int,
+    used_hashes: set[str],
+    region: tuple[float, float, float, float] | None,
+    attempts: int = 3,
+) -> bool:
+    """Extract a frame for one entity whose bytes are NOT already used.
+
+    Seeded windows pick entity-specific moments; the hash check retries with
+    jittered seeds when the chosen frame duplicates an earlier asset. Returns
+    False only when extraction itself fails everywhere.
+    """
+    tag = final.stem
+    for attempt in range(attempts):
+        jitter = attempt * duration * 0.07
+        stamps = _timestamps_for_entity(duration, count=3, seed=seed + attempt * 7919)
+        for k, ts in enumerate(stamps):
+            ts = min(max(ts + jitter, 0.0), max(duration - 0.05, 0.0))
+            cand = out_dir / f"_{tag}_{attempt}_{k}.png"
+            try:
+                _extract_frame(video_path, ts, cand)
+            except subprocess.CalledProcessError:
+                continue
+            if region is not None:
+                cropped = out_dir / f"{tag}_{attempt}_{k}_c.png"
+                try:
+                    _crop_image(cand, cropped, region)
+                    cand.unlink(missing_ok=True)
+                    cand = cropped
+                except subprocess.CalledProcessError:
+                    cropped.unlink(missing_ok=True)
+                    # keep uncropped
+            digest = _file_hash(cand)
+            is_new = digest not in used_hashes
+            last_try = attempt == attempts - 1 and k == len(stamps) - 1
+            if is_new or last_try:
+                if not is_new:
+                    log.warning(
+                        "'%s' frame still duplicates an earlier asset — source video may be static there",
+                        tag,
+                    )
+                cand.replace(final)
+                used_hashes.add(digest)
+                return True
+            cand.unlink(missing_ok=True)
+    return False
+
 
 def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[str, Path]:
     """Extract visual assets from *video_path* based on *design* analysis.
@@ -126,10 +194,12 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
         return assets
 
     # ── 1. Background: frame from the middle of the video ────────────────────
+    used_hashes: set[str] = set()
     bg_path = out_dir / "background.png"
     try:
         _extract_frame(video_path, duration / 2, bg_path)
         assets["background"] = bg_path
+        used_hashes.add(_file_hash(bg_path))
         log.info("Extracted background from t=%.1fs", duration / 2)
     except subprocess.CalledProcessError as e:
         log.warning("Failed to extract background: %s", e)
@@ -138,49 +208,25 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
     characters = [c for c in design.characters if c.role != "narrator"]
     for char in characters:
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in char.name).strip("_").lower()
-        timestamps = _timestamps_for_entity(duration, count=3)
+        seed = zlib.crc32(char.name.encode("utf-8"))
         spatial_hint = ""
         # Try to find spatial hints from related objects
         for obj in design.objects:
             if char.name.lower() in obj.name.lower() or obj.name.lower() in char.name.lower():
                 spatial_hint = obj.spatial
                 break
+        region = _parse_spatial_hint(spatial_hint) if spatial_hint else None
 
-        best_path: Path | None = None
-        for j, ts in enumerate(timestamps):
-            raw_path = out_dir / f"_char_{safe_name}_{j}.png"
-            try:
-                _extract_frame(video_path, ts, raw_path)
-            except subprocess.CalledProcessError:
-                continue
-
-            if spatial_hint:
-                cropped_path = out_dir / f"char_{safe_name}_{j}.png"
-                region = _parse_spatial_hint(spatial_hint)
-                try:
-                    _crop_image(raw_path, cropped_path, region)
-                    raw_path.unlink(missing_ok=True)
-                    raw_path = cropped_path
-                except subprocess.CalledProcessError:
-                    pass  # keep uncropped
-
-            if best_path is None:
-                best_path = raw_path
-            else:
-                # Keep all variants; first is the default
-                pass
-
-        if best_path:
-            final = out_dir / f"char_{safe_name}.png"
-            if best_path != final:
-                best_path.rename(final)
-                # Clean up other variants
-                for f in out_dir.glob(f"_char_{safe_name}_*.png"):
-                    f.unlink(missing_ok=True)
-                for f in out_dir.glob(f"char_{safe_name}_*.png"):
-                    f.unlink(missing_ok=True)
+        final = out_dir / f"char_{safe_name}.png"
+        accepted = _capture_distinct(
+            video_path, duration, out_dir, final,
+            seed=seed, used_hashes=used_hashes, region=region,
+        )
+        if accepted:
             assets[f"characters/{safe_name}"] = final
             log.info("Extracted character '%s' sprite", char.name)
+        else:
+            log.warning("Character '%s': no frame could be extracted", char.name)
 
     # ── 3. Object sprites (collectibles, obstacles, key objects) ─────────────
     key_objects = [
@@ -189,26 +235,20 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
     ]
     for obj in key_objects:
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in obj.name).strip("_").lower()
-        ts = _timestamps_for_entity(duration, count=1)[0]
-        raw_path = out_dir / f"_obj_{safe_name}.png"
-        try:
-            _extract_frame(video_path, ts, raw_path)
-        except subprocess.CalledProcessError:
-            continue
-
+        region = _parse_spatial_hint(obj.spatial) if obj.spatial else None
         final = out_dir / f"obj_{safe_name}.png"
-        if obj.spatial:
-            region = _parse_spatial_hint(obj.spatial)
-            try:
-                _crop_image(raw_path, final, region)
-                raw_path.unlink(missing_ok=True)
-            except subprocess.CalledProcessError:
-                raw_path.rename(final)
+        accepted = _capture_distinct(
+            video_path, duration, out_dir, final,
+            seed=zlib.crc32(obj.name.encode("utf-8")),
+            used_hashes=used_hashes,
+            region=region,
+            attempts=2,
+        )
+        if accepted:
+            assets[f"objects/{safe_name}"] = final
+            log.info("Extracted object '%s' sprite", obj.name)
         else:
-            raw_path.rename(final)
-
-        assets[f"objects/{safe_name}"] = final
-        log.info("Extracted object '%s' sprite", obj.name)
+            log.warning("Object '%s': no frame could be extracted", obj.name)
 
     # ── 4. Scene backgrounds (first scene gets the main background) ──────────
     for i, scene in enumerate(design.scenes[1:], start=1):  # skip first (already have background)

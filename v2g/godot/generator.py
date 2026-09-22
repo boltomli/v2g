@@ -1,14 +1,16 @@
 """Generate a complete Godot 4.x project from a GameDesign document.
 
 Strategy:
-1. Ask the LLM to generate ALL GDScript files from the full design context.
-2. Validate LLM output; fall back to template scripts for any missing essentials.
-3. Generate main.tscn programmatically from the design (objects, enemies, dialogue).
-4. Write project.godot, game_design.json, and all scripts.
+1. Ask the LLM to generate optional GDScript extras from the design context.
+2. Fill template-owned essentials: vn_manager.gd (VN runtime with the
+   bilingual story) and a contract-compliant game_manager.gd.
+3. Generate main.tscn from the VN template (Control root + GameManager).
+4. Write project.godot (advance input only), game_design.json, and scripts.
 """
 
 import json
 import logging
+import subprocess
 from pathlib import Path
 
 from v2g.config import settings
@@ -17,6 +19,40 @@ from v2g.llm.analyzer import GameDesign
 from v2g.llm.client import chat
 
 log = logging.getLogger(__name__)
+
+
+def _finalize_with_godot(project_root: Path) -> None:
+    """Generation-stage self-check: import assets, then boot the game once.
+
+    A fresh project has no ``.godot/imported`` cache — without this step the
+    first launch reports missing textures. Booting headless afterwards surfaces
+    scene/script errors at generation time instead of in front of the player.
+    Best-effort: missing Godot only downgrades to a warning.
+    """
+    godot = settings.godot_path
+    steps = [
+        ([godot, "--headless", "--editor", "--quit-after", "20", "--path", str(project_root)],
+         "asset import"),
+        ([godot, "--headless", "--path", str(project_root), "--quit-after", "5"],
+         "startup validation"),
+    ]
+    for cmd, what in steps:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=180, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("Godot %s skipped: %s", what, e)
+            return
+        output = (result.stdout or "") + (result.stderr or "")
+        problems = [
+            ln for ln in output.splitlines()
+            if "SCRIPT ERROR" in ln or "Parse Error" in ln or "ERROR: Failed" in ln
+        ]
+        if problems:
+            log.warning("Godot %s reported issues:\n%s", what, "\n".join(problems[:20]))
+        else:
+            log.info("Godot %s OK", what)
 
 
 def _safe_name(title: str) -> str:
@@ -54,6 +90,9 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
             if not isinstance(source, str):
                 continue
             safe_fname = fname if fname.endswith(".gd") else f"{fname}.gd"
+            if safe_fname == "vn_manager.gd":
+                log.info("Ignoring LLM vn_manager.gd — the VN runtime is template-owned")
+                continue
             # Basic sanity: must start with extends or @tool or @export or class_name
             stripped = source.lstrip()
             if not any(stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name")):
@@ -66,25 +105,24 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
     return scripts
 
 
-def _ensure_essentials(scripts: dict[str, str], design: GameDesign) -> dict[str, str]:
-    """Ensure essential scripts exist; fill missing ones from templates."""
-    if "player.gd" not in scripts:
-        log.info("Fallback: generating player.gd from template")
-        scripts["player.gd"] = T.player_script(design)
+def _ensure_essentials(
+    scripts: dict[str, str],
+    design: GameDesign,
+    assets: dict[str, Path] | None = None,
+) -> dict[str, str]:
+    """Ensure essential scripts exist; fill missing ones from templates.
 
-    if "game_manager.gd" not in scripts:
-        log.info("Fallback: generating game_manager.gd from template")
+    - vn_manager.gd is ALWAYS template-owned (it embeds the bilingual story).
+    - game_manager.gd must keep the score_changed/add_score contract the VN
+      runtime wires to; anything else falls back to the template.
+    """
+    gm = scripts.get("game_manager.gd")
+    if gm is None or "score_changed" not in gm:
+        if gm is not None:
+            log.warning("game_manager.gd lacks the score_changed contract — using template")
         scripts["game_manager.gd"] = T.game_manager_script(design)
 
-    has_enemies = any(
-        c.role in ("antagonist", "boss", "minion", "enemy")
-        for c in design.characters
-    ) or any(o.role == "enemy" for o in design.objects)
-
-    if has_enemies and "enemy.gd" not in scripts:
-        log.info("Fallback: generating enemy.gd from template")
-        scripts["enemy.gd"] = T.enemy_script()
-
+    scripts["vn_manager.gd"] = T.vn_manager_script(design, assets)
     return scripts
 
 
@@ -103,14 +141,12 @@ def generate(
 
     Generated structure:
         <project>/
-            project.godot
-            main.tscn          (data-driven: player + enemies + environment + UI + sprites)
-            player.gd
-            game_manager.gd
-            enemy.gd           (if enemies exist)
-            dialogue_ui.gd     (if dialogue exists)
+            project.godot        (advance input only — visual novel)
+            main.tscn            (Control root: vn_manager + GameManager)
+            vn_manager.gd        (template-owned VN runtime with bilingual story)
+            game_manager.gd      (LLM or fallback; score_changed contract)
             ...additional LLM-generated scripts...
-            assets/            (extracted video frames as sprites/backgrounds)
+            assets/              (extracted video frames as backgrounds/portraits)
             game_design.json
     """
     if project_root is None:
@@ -138,7 +174,7 @@ def generate(
     # 2. Generate ALL scripts via LLM
     log.info("Generating GDScript files via LLM...")
     scripts = _generate_scripts(design)
-    scripts = _ensure_essentials(scripts, design)
+    scripts = _ensure_essentials(scripts, design, assets)
     log.info("Generated %d script(s): %s", len(scripts), ", ".join(sorted(scripts)))
 
     # 3. project.godot
@@ -146,9 +182,9 @@ def generate(
         T.project_dot_godot(design.title), encoding="utf-8"
     )
 
-    # 4. main.tscn — data-driven from design + assets
+    # 4. main.tscn — visual-novel root (vn_manager + GameManager)
     (project_root / "main.tscn").write_text(
-        T.main_scene(design, scripts, assets), encoding="utf-8"
+        T.main_scene(design, scripts), encoding="utf-8"
     )
 
     # 5. Write all scripts
@@ -159,5 +195,8 @@ def generate(
     (project_root / "game_design.json").write_text(
         design.model_dump_json(indent=2), encoding="utf-8"
     )
+
+    # 7. Import assets and boot once — errors surface at generation time
+    _finalize_with_godot(project_root)
 
     return project_root

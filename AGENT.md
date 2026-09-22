@@ -7,14 +7,19 @@
 ```
 Video (file / URL)
   │
-  ├─ Fast mode (default): ffmpeg extracts N keyframes ──┐
-  │                                                      ▼
-  ├─ Detail mode (-d): ffmpeg trims/compresses ──▶ LLM analyzes ──▶ GameDesign JSON
+  ├─ URL: yt-dlp downloads video + subtitles (.srt sidecars) ─┐
+  │                                                            ▼
+  │                                          Transcript extraction (ffmpeg)
+  │                                           └─ source-language lines ONLY
+  │                                              (sidecar / embedded subs)
+  ├─ Fast mode (default): ffmpeg extracts N keyframes ──┐      │
+  │                                                      ▼      │
+  ├─ Detail mode (-d): ffmpeg trims/compresses ──▶ LLM analyzes ─┘ ──▶ GameDesign JSON
   │                                                      │
   │                                                      ▼
   │                                              Asset Extractor (ffmpeg)
   │                                               ├─ Background frames
-  │                                               ├─ Character sprites
+  │                                               ├─ Character sprites (byte-distinct)
   │                                               └─ Object sprites
   │                                                      │
   │                              ┌────────────────────────┘
@@ -22,20 +27,22 @@ Video (file / URL)
   │                      [Image Gen API]  ← optional, future
   │                       (style transfer)
   │                              │
-  └──────────────────────────────┼───────────────────────┘
+  └──────────────────────────────┼───────────────────────────────┘
                                  ▼
-                         Godot Project Generator
-                                 │
+                         Godot Project Generator  (visual novel)
+                                 │  └─ Godot import + headless boot (self-check)
                                  ▼
                           projects/<title>/
-                          ├── project.godot
-                          ├── main.tscn
-                          ├── player.gd
+                          ├── project.godot        (advance input only)
+                          ├── main.tscn            (Control root + GameManager)
+                          ├── vn_manager.gd        (template-owned VN runtime,
+                          │                         bilingual story embedded)
                           ├── game_manager.gd
-                          ├── assets/          ← extracted video frames
+                          ├── assets/              ← extracted video frames
                           │   ├── background.png
-                          │   ├── characters/
-                          │   └── objects/
+                          │   ├── char_*.png
+                          │   ├── obj_*.png
+                          │   └── scene_*.png
                           └── game_design.json
 ```
 
@@ -75,6 +82,24 @@ All via env vars or `.env`:
 | `V2G_SCENE_THRESHOLD` | `0.3` | ffmpeg scene-detect sensitivity (0.0–1.0) |
 | `V2G_CHUNK_DURATION` | `600` | Seconds per analysis chunk (detail mode, long videos) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB per chunk |
+
+## Language & dialogue contract
+
+The generated game is a **visual novel** with bilingual dialogue. Hard rules,
+enforced in the analyzer prompts and the generator:
+
+- **Target language: Simplified Chinese.** Every story entry carries `line_zh`
+  (translation for dialogue, original Chinese narration otherwise). All
+  template-authored UI strings (hints, score label, end card) are Chinese-only.
+- **Source language comes from the video, never from the LLM.** `line` may only
+  contain lines transcribed from the source material. The pipeline extracts
+  subtitles (sidecar `.srt`/`.vtt`/`.ass`, or the embedded subtitle stream) and
+  injects the transcript into every analysis mode; LLM prompts mark it
+  authoritative and require `line` to stay EMPTY when no transcript exists.
+- Choice options are player-authored UI text: Chinese-only, unless the exact
+  wording appears in the transcript.
+- `dialogue_samples` **is the full playable script in order** — the generator
+  embeds it (steps + choices + score) into `vn_manager.gd` at generation time.
 
 ## GameDesign Schema
 
@@ -137,9 +162,16 @@ class Transition:
     effect: str                   # Visual transition effect
 
 class Dialogue:
-    speaker: str
-    line: str
+    speaker: str                  # empty for narration entries
+    line: str                     # VERBATIM source line from the transcript; empty = narration
+    line_zh: str                  # REQUIRED Simplified Chinese: translation / original narration
     context: str                  # When/why this line is said
+    choices: list[DialogueChoice] # player options: {line, line_zh, score}
+
+class DialogueChoice:
+    line: str = ""                # source-language text ONLY if verbatim in transcript
+    line_zh: str                  # Simplified Chinese option text
+    score: int = 1                # reputation/alliance points on selection
 ```
 
 ## Generated Godot Project
@@ -148,25 +180,33 @@ class Dialogue:
 
 | File | Source | Description |
 |---|---|---|
-| `project.godot` | template | Engine config, window size, input map (move, jump, interact) |
-| `main.tscn` | data-driven | Scene tree: Player + Enemies + Environment + Collectibles + Triggers + DialogueUI + Sprites |
-| `player.gd` | LLM | Player controller matching character's behavior and abilities |
-| `game_manager.gd` | LLM | Game state: score, goals, scene transitions, win/lose |
-| `enemy.gd` | LLM | Enemy AI matching character patrol/attack patterns (if enemies exist) |
-| `dialogue_ui.gd` | LLM | Dialogue system with speaker name + line display (if dialogue exists) |
-| `*.gd` (extras) | LLM | Any additional scripts: inventory, combat, camera, UI, etc. |
+| `project.godot` | template | Engine config, window size, `advance` input (Space/Enter) |
+| `main.tscn` | template | Visual-novel root: `Control` (vn_manager.gd) + `GameManager` |
+| `vn_manager.gd` | template | VN runtime: embedded bilingual story, dialogue box (source line + Chinese subtitle), choices, portraits, background flashes, restart |
+| `game_manager.gd` | LLM | Game state honoring the `score_changed`/`add_score` contract (template fallback) |
+| `*.gd` (extras) | LLM | Optional extras: alliance map, minigames, audio, save/load |
 | `assets/background.png` | ffmpeg | Representative frame from video midpoint as scene background |
-| `assets/characters/*.png` | ffmpeg | Character sprite frames (cropped using spatial hints) |
-| `assets/objects/*.png` | ffmpeg | Object sprite frames (collectibles, weapons, etc.) |
+| `assets/char_*.png` | ffmpeg | Character sprite frames — seeded per entity and hash-checked byte-distinct |
+| `assets/obj_*.png` | ffmpeg | Object sprite frames (collectibles, weapons, etc.) |
+| `assets/scene_*.png` | ffmpeg | Additional scene backgrounds for multi-scene videos |
 | `game_design.json` | analyzer | Full design document as project metadata |
+
+After writing files, the generator runs Godot headless twice (import scan, then
+a boot) so missing assets or script errors surface at **generation time**.
 
 ### Asset extraction
 
 After LLM analysis, the pipeline extracts visual assets from the source video:
 - **Background**: A representative frame from the video midpoint → `assets/background.png`
-- **Characters**: Frames at 3 timestamps per character, cropped using the LLM's spatial descriptions → `assets/characters/<name>.png`
-- **Objects**: Frames for collectibles, weapons, decoration objects → `assets/objects/<name>.png`
+- **Characters**: Frames from a per-entity seeded time window, cropped using the
+  LLM's spatial descriptions → `assets/char_<name>.png`
+- **Objects**: Frames for collectibles, weapons, decoration objects → `assets/obj_<name>.png`
 - **Scenes**: Additional background frames for multi-scene videos → `assets/scene_<name>.png`
+
+**Distinctness guarantee**: each entity samples its own window of the timeline
+(name-seeded), and every accepted sprite's SHA-256 is checked against everything
+already extracted — duplicates are re-taken with jittered seeds. One entity can
+never receive another entity's byte-identical frame.
 
 Spatial cropping uses the `spatial` field from `GameObject` analysis:
 - "left side of frame" → crops to left 40%
@@ -194,29 +234,25 @@ implement `transform()` and `is_available()`, then update `get_provider()` facto
 
 ### Scene tree (main.tscn)
 
-The scene is generated programmatically from the design:
-- **Player** — CharacterBody2D + CollisionShape2D + Camera2D
-- **Enemy_\<Name\>** — CharacterBody2D for each enemy character/object (max 8)
-- **Env_\<Name\>** — StaticBody2D for environment/obstacle objects (max 12)
-- **Collectible_\<Name\>** — Area2D for collectible objects (max 16)
-- **Trigger_\<Name\>** — Area2D for trigger objects (max 8)
-- **GameManager** — Node with game_manager.gd
-- **DialogueUI** — CanvasLayer + Panel + RichTextLabel (if dialogue exists)
+The scene is a minimal, template-owned visual-novel root:
+- **Main** — `Control` (full rect) with `vn_manager.gd`: builds backgrounds,
+  character portraits, the bilingual dialogue box (source line + Chinese
+  subtitle), choice buttons, score/hint HUD, and scene-flash transitions at
+  runtime from the embedded story JSON
+- **GameManager** — Node with `game_manager.gd` (`score_changed`/`add_score` contract)
 
 ### Input mapping
 
-- `move_left`: A / Left arrow
-- `move_right`: D / Right arrow
-- `jump`: Space / Up arrow
-- `interact`: E / Enter
+- `advance`: Space / Enter (dialogue advance, restart on the end card)
+- Left mouse click: advance, or pick a choice option (choice buttons intercept)
 
 ### Extending
 
-Generated scripts are starting points. Open in Godot 4.x and iterate:
-1. Replace placeholder shapes with actual sprites
-2. Build tilemaps from the `level.layout` descriptions
-3. Wire up `game_manager.gd` signals to UI nodes
-4. Add audio based on `style` and `mechanics` descriptions
+Generated projects are starting points. Open in Godot 4.x and iterate:
+1. Edit the story in `vn_manager.gd`'s `STORY_JSON` (or change `game_design.json` and regenerate)
+2. Add choice branches / minigames as extra LLM scripts around the VN runtime
+3. Wire `game_manager.gd` goals to win/lose and the alliance map
+4. Add audio based on `style` and `atmosphere` descriptions
 
 ## Dependencies
 

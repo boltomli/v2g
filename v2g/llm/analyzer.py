@@ -9,7 +9,9 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from v2g.config import settings
 from v2g.llm.client import chat
+from v2g.video.dialogue import TranscriptLine, format_transcript
 
 # Import OpenAI exceptions for chunked analysis error handling
 try:
@@ -86,12 +88,50 @@ _JSON_SCHEMA = """\
 
   "dialogue_samples": [
     {
-      "speaker": "string — character name",
-      "line": "string — a representative line of dialogue",
-      "context": "string — when/why this line is said"
+      "speaker": "string — character name (empty for narration entries)",
+      "line": "string — VERBATIM source-language line copied from the transcript (or dialogue you can actually perceive); EMPTY for narration",
+      "line_zh": "string — REQUIRED. Simplified Chinese: translation of `line` for dialogue, original Chinese narration otherwise",
+      "context": "string — when/why this line is said",
+      "choices": [
+        {"line": "string — source-language option text ONLY if it appears verbatim in the transcript, else empty",
+         "line_zh": "string — REQUIRED. Simplified Chinese option text",
+         "score": 1}
+      ]
     }
   ]
 }
+"""
+
+# ── Shared rule blocks (both prompts) ──────────────────────────────────────
+
+_LANGUAGE_RULES = """\
+LANGUAGE AND SUBTITLE RULES (hard requirements):
+- TARGET LANGUAGE: Simplified Chinese. Every dialogue entry MUST carry `line_zh`.
+- SOURCE LANGUAGE: any non-Chinese text you put in `line` MUST be transcribed
+  VERBATIM from the source material — the provided transcript, or dialogue you
+  can actually perceive in the video. NEVER invent, paraphrase, or translate
+  into a foreign language yourself.
+- No transcript provided (or you cannot perceive speech): leave `line` EMPTY.
+  An empty `line` marks a narration entry — write it in `line_zh` only.
+- Narration and stage directions not spoken in the video are Chinese-only
+  (`line` empty, `line_zh` carries the text).
+- Choice options are player-authored UI text: Chinese-only (`line` empty)
+  unless the exact wording appears in the transcript.
+"""
+
+_VN_RULES = """\
+GAME FORM (hard requirements):
+- The output is a VISUAL NOVEL: a dialogue-driven story game with choices.
+  No platformer physics, no free movement, no combat.
+- `dialogue_samples` IS the full playable story script in playing order: every
+  usable source line from the transcript, plus Chinese narration beats bridging
+  the scenes, ending with a closing beat.
+- Attach `choices` to entries where the player must decide; each option's
+  `score` feeds reputation/alliance tracking.
+- `controls` describes only the VN scheme: Space/Enter/click advances dialogue,
+  mouse picks choices. Never describe move/jump/combat controls.
+- `mechanics`, `scenes`, and `progression` adapt the source content into
+  choice-driven narrative beats, not platformer levels to traverse.
 """
 
 # ── System prompts ──────────────────────────────────────────────────────────
@@ -129,9 +169,11 @@ CHARACTER IDENTITY RULES:
   consistent — only clothing and gear change.
 - **Do NOT create separate characters for the same person in different clothes.**
   A warrior in armor and the same man in casual clothes are ONE character with TWO personas.
-- If you cannot tell whether two people are the same, use face_id to mark them as
-  "possibly same" — the merge system will reconcile.
+If you cannot tell whether two people are the same, use face_id to mark them as
+"possibly same" — the merge system will reconcile.
 
+{_LANGUAGE_RULES}
+{_VN_RULES}
 {_JSON_SCHEMA}
 
 Return ONLY the JSON, no markdown fences, no commentary.
@@ -184,6 +226,8 @@ CHARACTER IDENTITY RULES:
 - Same character referred to by different names in different scenes → merge under one entry,
   note all names in the "name" field (e.g. "John / The Stranger").
 
+{_LANGUAGE_RULES}
+{_VN_RULES}
 {_JSON_SCHEMA}
 
 Return ONLY the JSON, no markdown fences, no commentary.
@@ -253,10 +297,20 @@ class SceneTransition(BaseModel):
         return super().model_validate(data, **kwargs)
 
 
+class DialogueChoice(BaseModel):
+    """One player-facing choice option. `line` only if verbatim from source."""
+    line: str = ""
+    line_zh: str = ""
+    score: int = 1
+
+
 class DialogueSample(BaseModel):
-    speaker: str
-    line: str
+    """One story-script entry. Empty `line` = narration (Chinese-only)."""
+    speaker: str = ""
+    line: str = ""       # source language, VERBATIM from video transcript only
+    line_zh: str = ""    # Simplified Chinese: translation / original narration
     context: str = ""
+    choices: list[DialogueChoice] = []
 
 
 class GameDesign(BaseModel):
@@ -309,6 +363,20 @@ def _parse(raw: str) -> GameDesign:
     return GameDesign.model_validate(data)
 
 
+def _transcript_note(transcript: str | None) -> str:
+    """Wrap the extracted source transcript for injection into the user message."""
+    if transcript:
+        return (
+            "\n=== TRANSCRIPT EXTRACTED FROM THE SOURCE VIDEO "
+            "(authoritative for every `line`) ===\n"
+            f"{transcript}\n=== END TRANSCRIPT ===\n"
+        )
+    return (
+        "\n(No transcript is available for this video and you cannot rely on "
+        "speech: leave every `line` EMPTY — narration goes into `line_zh` only.)\n"
+    )
+
+
 def _inject_instruct(user_msg: str, instruct: str | None) -> str:
     """Append style instruction to the user message if provided."""
     if not instruct:
@@ -324,20 +392,31 @@ def _inject_instruct(user_msg: str, instruct: str | None) -> str:
     )
 
 
-def analyze(frames: list[Path], *, instruct: str | None = None) -> GameDesign:
+def analyze(
+    frames: list[Path],
+    *,
+    instruct: str | None = None,
+    transcript: str | None = None,
+) -> GameDesign:
     """Analyze video keyframes → GameDesign (fast mode)."""
     user_msg = (
         "Here are key frames extracted from a video. "
         "Analyze every frame in detail: identify characters, environments, narrative beats, "
         "visual style, and interactive elements. Generate a comprehensive game design document "
         "that would allow a developer to recreate this content as a playable game.\n"
+        + _transcript_note(transcript)
     )
     parts: list[str | Path] = [_inject_instruct(user_msg, instruct)]
     parts.extend(frames)
     return _parse(chat(_SYSTEM_FRAMES, parts))
 
 
-def analyze_video(video_path: Path, *, instruct: str | None = None) -> GameDesign:
+def analyze_video(
+    video_path: Path,
+    *,
+    instruct: str | None = None,
+    transcript: str | None = None,
+) -> GameDesign:
     """Analyze a full video file → GameDesign (detailed mode).
 
     Sends the video directly to a model with video understanding support.
@@ -349,6 +428,7 @@ def analyze_video(video_path: Path, *, instruct: str | None = None) -> GameDesig
         "Identify every character, environment, story beat, and visual element. "
         "Generate a comprehensive game design document that captures the source "
         "content with enough fidelity for a near 1:1 recreation as a playable game.\n"
+        + _transcript_note(transcript)
     )
     parts: list[str | Path] = [_inject_instruct(user_msg, instruct), video_path]
     return _parse(chat(_SYSTEM_VIDEO, parts, max_tokens=16384, temperature=0.3))
@@ -359,6 +439,7 @@ def analyze_video_chunked(
     *,
     instruct: str | None = None,
     chunk_label: str = "",
+    transcript: list[TranscriptLine] | None = None,
 ) -> GameDesign:
     """Analyze a long video in segments and merge results.
 
@@ -369,9 +450,13 @@ def analyze_video_chunked(
         segments: Ordered list of video segment file paths.
         instruct: Optional style instruction.
         chunk_label: Prefix for progress messages (e.g. "1/3").
+        transcript: Full-source transcript; each segment only receives the
+            lines whose timestamps fall inside its window.
     """
     if len(segments) == 1:
-        return analyze_video(segments[0], instruct=instruct)
+        return analyze_video(segments[0], instruct=instruct, transcript=(
+            format_transcript(transcript) if transcript else None
+        ))
 
     import logging
     log = logging.getLogger(__name__)
@@ -380,8 +465,15 @@ def analyze_video_chunked(
     for i, seg in enumerate(segments):
         label = f"[{i + 1}/{len(segments)}]"
         log.info("Analyzing segment %s", label)
+        seg_transcript: str | None = None
+        if transcript:
+            seg_transcript = format_transcript(
+                transcript,
+                start=i * settings.chunk_duration,
+                end=(i + 1) * settings.chunk_duration,
+            ) or None
         try:
-            d = analyze_video(seg, instruct=instruct)
+            d = analyze_video(seg, instruct=instruct, transcript=seg_transcript)
             designs.append(d)
             log.info("  Segment %s: '%s' — %d chars, %d scenes",
                      label, d.title, len(d.characters), len(d.scenes))
@@ -462,9 +554,14 @@ def _merge_designs(designs: list[GameDesign]) -> GameDesign:
     narratives = [d.narrative for d in designs if d.narrative]
     base.narrative = "\n\n".join(narratives) if narratives else base.narrative
 
-    # Concatenate dialogue
+    # Concatenate dialogue, dropping exact repeats across segments
+    seen_lines = {(ds.speaker.lower(), ds.line, ds.line_zh) for ds in base.dialogue_samples}
     for d in designs[1:]:
-        base.dialogue_samples.extend(d.dialogue_samples)
+        for ds in d.dialogue_samples:
+            key = (ds.speaker.lower(), ds.line, ds.line_zh)
+            if key not in seen_lines:
+                base.dialogue_samples.append(ds)
+                seen_lines.add(key)
 
     # Take longest (most detailed) for these text fields
     for field in ("physics", "progression", "atmosphere"):

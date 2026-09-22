@@ -22,7 +22,11 @@ log = logging.getLogger(__name__)
 
 
 def _download_url(url: str, dest: Path) -> Path:
-    """Download a video from *url* into *dest* via yt-dlp and return the file path."""
+    """Download a video from *url* into *dest* via yt-dlp and return the file path.
+
+    Subtitles (including auto-generated ones) are downloaded next to the video
+    as SRT sidecars — they are the authoritative source-language dialogue.
+    """
     out_tpl = str(dest / "video.%(ext)s")
     subprocess.run(
         [
@@ -30,6 +34,10 @@ def _download_url(url: str, dest: Path) -> Path:
             "--no-playlist",
             "-f", "bv*+ba/b",
             "--merge-output-format", "mp4",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs", "all,-live",
+            "--convert-subs", "srt",
             "-o", out_tpl,
             url,
         ],
