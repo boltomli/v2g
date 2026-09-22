@@ -65,14 +65,22 @@ uv run v2g ./gameplay.mp4 -d
 # From a URL
 uv run v2g "https://www.youtube.com/watch?v=..."
 
-# Custom output directory
+# Custom run directory (default: projects/<timestamp>_<source>/ — new per run)
 uv run v2g ./clip.mp4 -o ./my_game
 ```
+
+Every run gets its own `projects/<timestamp>_<source>/` directory holding
+`v2g.log`, `work/`, `llm/` and the game — delete it to remove the whole run.
+Layered caching avoids pointless retries: `projects/.v2g_cache/` stores raw
+LLM responses keyed by exact request content (reruns make zero API calls;
+`V2G_LLM_CACHE=0` disables), and `<run>/design.json` lets a rerun with the
+same `-o` skip analysis entirely. Only a cached answer that fails validation
+is refetched.
 
 Then open the generated project in Godot:
 
 ```bash
-godot --editor projects/<game-title>
+godot --editor projects/<run-id>
 ```
 
 ## Configuration
@@ -84,6 +92,7 @@ All settings via environment variables (or `.env` file):
 | `V2G_LLM_API_KEY` | — | API key (required) |
 | `V2G_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `V2G_LLM_MODEL` | `gpt-4o` | Model name |
+| `V2G_LLM_CACHE` | `1` | Cache raw LLM responses across runs (`0` disables) |
 | `V2G_GODOT_PATH` | `godot` | Godot executable |
 | `V2G_MAX_DURATION` | `120` | Max video seconds (detail mode) |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between extracted frames (fast mode) |
@@ -107,5 +116,6 @@ v2g/
 │   └── godot/
 │       ├── generator.py     # project scaffolding + Godot self-check
 │       └── templates.py     # VN scene, vn_manager story runtime, prompts
-└── projects/                # generated games
+└── projects/                # generated games — one fresh directory per run
+                              # (v2g.log, work/, llm/, and the game inside)
 ```

@@ -1,12 +1,14 @@
 """CLI entry point for v2g: video → Godot game pipeline."""
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 from rich.console import Console
 
 from v2g import __version__
+from v2g.llm.errors import LLMOutputError
 
 console = Console()
 
@@ -21,7 +23,7 @@ def main(argv: list[str] | None = None) -> None:
         "-o", "--output",
         type=Path,
         default=None,
-        help="Output directory for the Godot project (default: projects/<title>/)",
+        help="Override run directory (default: projects/<timestamp>_<source>/ — new per run)",
     )
     parser.add_argument(
         "-d", "--detail",
@@ -47,9 +49,15 @@ def main(argv: list[str] | None = None) -> None:
     except FileNotFoundError as e:
         console.print(f"[bold red]Error:[/] {e}")
         sys.exit(1)
+    except LLMOutputError as e:
+        console.print(f"[bold red]LLM output error:[/] {e}")
+        sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/]")
         sys.exit(130)
+    except Exception:
+        logging.getLogger(__name__).exception("Run failed")
+        raise
 
 
 if __name__ == "__main__":

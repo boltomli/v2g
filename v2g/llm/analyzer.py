@@ -5,12 +5,15 @@ of the source content as a Godot game — characters, scenes, narrative beats,
 visual style, spatial layout, and gameplay mechanics.
 """
 
+import logging
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from v2g import cache, runlog
 from v2g.config import settings
 from v2g.llm.client import chat
+from v2g.llm.errors import LLMOutputError
 from v2g.video.dialogue import TranscriptLine, format_transcript
 
 # Import OpenAI exceptions for chunked analysis error handling
@@ -19,6 +22,8 @@ try:
 except ImportError:
     class _OpenAIError(Exception):
         pass
+
+log = logging.getLogger(__name__)
 
 # ── JSON schema (shared by both prompts) ────────────────────────────────────
 
@@ -337,18 +342,139 @@ class GameDesign(BaseModel):
         return self.scenes
 
 
-def _parse(raw: str) -> GameDesign:
-    """Clean LLM output and parse into GameDesign."""
-    import json as _json
-    cleaned = raw.strip()
+def _strip_fences(text: str) -> str:
+    cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = "\n".join(cleaned.split("\n")[1:])
     if cleaned.endswith("```"):
         cleaned = "\n".join(cleaned.split("\n")[:-1])
-    cleaned = cleaned.strip()
+    return cleaned.strip()
+
+
+def _json_candidates(raw: str) -> list[str]:
+    """Ordered candidate bodies: fence-stripped full text, then outermost {…}."""
+    cleaned = _strip_fences(raw)
+    out = [cleaned]
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if 0 <= start < end:
+        out.append(cleaned[start:end + 1])
+    return list(dict.fromkeys(out))
+
+
+def _close(s: str) -> str | None:
+    """Close an unterminated string and unbalanced brackets of *s*.
+
+    Returns None when brackets are mismatched (not worth salvaging).
+    """
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]" and (not stack or stack.pop() != ch):
+            return None
+    if in_str and esc:
+        s = s[:-1]  # dangling escape from truncation — drop it
+    return s + ('"' if in_str else "") + "".join(reversed(stack))
+
+
+def _closure_candidates(s: str) -> list[str]:
+    """Candidate repairs for truncated JSON, best (fullest) first.
+
+    1. Close the open string/brackets as-is (truncation landed on a complete
+       value or inside a string VALUE).
+    2. Cut back at each outside-string comma from the end (truncation landed
+       mid-key / mid-token) and close from there.
+    """
+    cands: list[str] = []
+    closed = _close(s)
+    if closed:
+        cands.append(closed)
+
+    commas: list[int] = []
+    in_str = False
+    esc = False
+    for i, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == ",":
+            commas.append(i)
+
+    for i in reversed(commas[-500:]):
+        prefix = s[:i].rstrip()
+        if not prefix:
+            break
+        cand = _close(prefix)
+        if cand and cand not in cands:
+            cands.append(cand)
+    return cands
+
+
+def _salvage(raw: str) -> dict | None:
+    """Best-effort parse of truncated/malformed LLM JSON into a dict."""
+    import json as _json
+    for cand in _json_candidates(raw):
+        for attempt in _closure_candidates(cand):
+            try:
+                data = _json.loads(attempt)
+            except _json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                log.info("Repaired malformed LLM JSON (%d → %d chars)", len(cand), len(attempt))
+                return data
+    return None
+
+
+def _parse(raw: str) -> GameDesign:
+    """Clean, repair and parse LLM output into GameDesign.
+
+    Repairs markdown fences, surrounding prose, and truncation at max_tokens
+    (response cut mid-document). If nothing parses, the raw response is dumped
+    to <run>/llm/ and LLMOutputError says where to look.
+    """
+    import json as _json
+    dump = runlog.llm_dump("analysis", raw)  # keep the raw response either way
+    last_err: Exception | None = None
+    data: dict | None = None
+    for cand in _json_candidates(raw):
+        try:
+            parsed = _json.loads(cand)
+        except _json.JSONDecodeError as e:
+            last_err = e
+            continue
+        if isinstance(parsed, dict):
+            data = parsed
+            break
+        last_err = ValueError(f"top-level JSON value is {type(parsed).__name__}, not an object")
+    if data is None:
+        data = _salvage(raw)
+    if data is None:
+        where = f" Raw response saved to {dump}." if dump else ""
+        raise LLMOutputError(
+            f"Cannot parse LLM design JSON: {last_err}.{where}"
+            " If the response was truncated, raise max_tokens or shorten the design."
+        )
 
     # Pre-process: handle from/to in scene_transitions
-    data = _json.loads(cleaned)
     if "scene_transitions" in data:
         for t in data["scene_transitions"]:
             if "from" in t and "source" not in t:
@@ -360,7 +486,91 @@ def _parse(raw: str) -> GameDesign:
     if "levels" in data and "scenes" not in data:
         data["scenes"] = data.pop("levels")
 
-    return GameDesign.model_validate(data)
+    try:
+        return GameDesign.model_validate(data)
+    except ValidationError as e:
+        where = f" Raw response saved to {dump}." if dump else ""
+        raise LLMOutputError(f"LLM design failed validation: {e}.{where}") from e
+
+
+def _request_design(system: str, parts: list[str | Path], **chat_kw) -> GameDesign:
+    """Parse layer above transport, with a bounded refresh policy.
+
+    A fresh response that fails to parse is never re-requested — that would
+    just re-pay for the same input. Only a *cached* response that proves bad
+    is invalidated and refetched, at most once.
+    """
+    res = chat(system, parts, **chat_kw)
+    try:
+        return _parse(res.text)
+    except LLMOutputError:
+        if not res.cached:
+            raise
+        cache.invalidate(res.key)
+        log.warning(
+            "Discarded invalid cached LLM response; refetching once (key=%.12s)", res.key
+        )
+        return _parse(chat(system, parts, refresh=True, **chat_kw).text)
+
+
+def analysis_key(
+    source_video: Path,
+    transcript: list[TranscriptLine],
+    *,
+    detailed: bool,
+    instruct: str | None,
+) -> str:
+    """Coarse key for a whole analysis result (run-local checkpoint).
+
+    Covers everything that shapes the design: source file identity, mode
+    (system prompt + token budget), extraction settings, model, style
+    instruction, and the transcript.
+    """
+    import hashlib
+    import json as _json
+
+    stat = source_video.stat()
+    material = _json.dumps(
+        {
+            "source_size": stat.st_size,
+            "source_mtime": stat.st_mtime_ns,
+            "model": settings.llm_model,
+            "system": _SYSTEM_VIDEO if detailed else _SYSTEM_FRAMES,
+            "max_tokens": 16384 if detailed else 8192,
+            "detailed": detailed,
+            "instruct": instruct or "",
+            "transcript": format_transcript(transcript),
+            "extract": {
+                "frame_interval": settings.frame_interval,
+                "scene_threshold": settings.scene_threshold,
+                "frame_budget": settings.frame_budget,
+                "max_duration": settings.max_duration,
+                "video_max_mb": settings.video_max_mb,
+                "chunk_duration": settings.chunk_duration,
+            },
+        },
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def save_checkpoint(run_dir: Path, design: GameDesign, key: str) -> None:
+    """Persist the analysis layer's output so a rerun of this run skips the LLM."""
+    (run_dir / "design.json").write_text(design.model_dump_json(indent=2), encoding="utf-8")
+    (run_dir / "design.key").write_text(key, encoding="utf-8")
+
+
+def load_checkpoint(run_dir: Path, key: str) -> GameDesign | None:
+    """Checkpointed design when inputs are unchanged, else None (stale/absent)."""
+    try:
+        if (run_dir / "design.key").read_text(encoding="utf-8").strip() != key:
+            log.info("Analysis checkpoint stale (inputs changed) — will re-run the LLM")
+            return None
+        return GameDesign.model_validate_json(
+            (run_dir / "design.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):  # missing/corrupt files; ValidationError ⊂ ValueError
+        return None
 
 
 def _transcript_note(transcript: str | None) -> str:
@@ -408,7 +618,7 @@ def analyze(
     )
     parts: list[str | Path] = [_inject_instruct(user_msg, instruct)]
     parts.extend(frames)
-    return _parse(chat(_SYSTEM_FRAMES, parts))
+    return _request_design(_SYSTEM_FRAMES, parts)
 
 
 def analyze_video(
@@ -431,7 +641,7 @@ def analyze_video(
         + _transcript_note(transcript)
     )
     parts: list[str | Path] = [_inject_instruct(user_msg, instruct), video_path]
-    return _parse(chat(_SYSTEM_VIDEO, parts, max_tokens=16384, temperature=0.3))
+    return _request_design(_SYSTEM_VIDEO, parts, max_tokens=16384, temperature=0.3)
 
 
 def analyze_video_chunked(

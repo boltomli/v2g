@@ -1,12 +1,17 @@
 """Thin wrapper around the OpenAI-compatible chat completions API."""
 
 import base64
+import logging
 import mimetypes
+from dataclasses import dataclass
 from pathlib import Path
 
 from openai import OpenAI
 
+from v2g import cache
 from v2g.config import settings
+
+log = logging.getLogger(__name__)
 
 _client: OpenAI | None = None
 
@@ -41,18 +46,43 @@ def _file_to_content(path: Path) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class ChatResult:
+    """One raw response plus cache provenance (transport-layer output)."""
+
+    text: str
+    cached: bool
+    key: str
+
+
 def chat(
     system: str,
     user_parts: list[str | Path],
     *,
     max_tokens: int = 8192,
     temperature: float = 0.4,
-) -> str:
-    """Send a multimodal chat request.
+    refresh: bool = False,
+) -> ChatResult:
+    """Send a multimodal chat request, served from the response cache when possible.
 
-    - str parts → text content
-    - Path parts → image or video content (auto-detected by extension)
+    - str parts → text content; Path parts → image/video (auto-detected by extension)
+    - refresh=True skips the cache read (used when a cached answer proved
+      invalid) and overwrites the stored entry with the fresh answer.
+    - Truncated output (finish=length) is never cached.
     """
+    key = cache.key_for(
+        model=settings.llm_model,
+        system=system,
+        parts=user_parts,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    if not refresh:
+        hit = cache.get(key)
+        if hit is not None:
+            log.info("chat: cache hit key=%.12s chars=%d", key, len(hit))
+            return ChatResult(hit, True, key)
+
     content: list[dict] = []
     for part in user_parts:
         if isinstance(part, Path):
@@ -69,4 +99,20 @@ def chat(
         max_tokens=max_tokens,
         temperature=temperature,
     )
-    return resp.choices[0].message.content or ""
+    choice = resp.choices[0]
+    text = choice.message.content or ""
+    usage = resp.usage
+    log.info(
+        "chat: finish=%s chars=%d prompt_tokens=%s completion_tokens=%s max_tokens=%d key=%.12s",
+        choice.finish_reason, len(text),
+        getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None),
+        max_tokens, key,
+    )
+    if choice.finish_reason == "length":
+        log.warning(
+            "chat output hit max_tokens=%d — response truncated; JSON may be incomplete",
+            max_tokens,
+        )
+    else:
+        cache.put(key, text)
+    return ChatResult(text, False, key)

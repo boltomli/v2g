@@ -1,17 +1,28 @@
 """End-to-end pipeline: video source → LLM analysis → Godot project."""
 
+import logging
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
 
+from v2g import runlog
 from v2g.config import settings
 from v2g.godot.generator import generate
-from v2g.llm.analyzer import GameDesign, analyze, analyze_video, analyze_video_chunked
+from v2g.llm.analyzer import (
+    GameDesign,
+    analysis_key,
+    analyze,
+    analyze_video,
+    analyze_video_chunked,
+    load_checkpoint,
+    save_checkpoint,
+)
 from v2g.video.dialogue import TranscriptLine, extract_dialogue, format_transcript
-from v2g.video.extractor import prepare_video_for_upload, resolve_source, split_video
+from v2g.video.extractor import extract, prepare_video_for_upload, resolve_source, split_video
 
 console = Console()
+log = logging.getLogger(__name__)
 
 
 def _print_design(design: GameDesign, instruct: str | None = None) -> None:
@@ -35,28 +46,15 @@ def _print_design(design: GameDesign, instruct: str | None = None) -> None:
     ))
 
 
-def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, instruct: str | None = None) -> Path:
-    """Execute the full pipeline and return the generated project path.
-
-    Args:
-        source: Local video file path or URL.
-        output_dir: Override output directory (default: projects/<title>/).
-        detailed: If True, send full video to LLM for deep analysis.
-        instruct: Optional style instruction (e.g. "medieval theme", "vampire style").
-
-    Returns:
-        Path to the generated Godot project directory.
-    """
-    # Resolve video source once (avoid double download for URLs)
-    source_video, _tmp = resolve_source(source)
-
-    # ── Source-language dialogue: subtitles are the only authoritative source ──
-    transcript_lines: list[TranscriptLine] = extract_dialogue(source_video)
-    if transcript_lines:
-        console.print(f"[bold cyan]▶ Transcript:[/] {len(transcript_lines)} subtitle lines from source video")
-    else:
-        console.print("[yellow]▶ No subtitles found — source-language lines will be left empty[/]")
-
+def _analyze(
+    source_video: Path,
+    work: Path,
+    transcript_lines: list[TranscriptLine],
+    *,
+    detailed: bool,
+    instruct: str | None,
+) -> GameDesign:
+    """Analyze layer: prepared source → GameDesign (checkpoint handled by caller)."""
     if detailed:
         # ── Detailed mode: send full video to LLM ────────────────────────
         from v2g.video.extractor import _get_duration
@@ -68,7 +66,7 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
             # Long video: split into chunks and analyze each separately
             n_segments = int(duration / chunk_dur) + 1
             console.print(f"[bold cyan]▶ Long video ({duration:.0f}s) — splitting into ~{n_segments} segments...[/]")
-            segments = split_video(source_video, _tmp, segment_duration=chunk_dur)
+            segments = split_video(source_video, work, segment_duration=chunk_dur)
             console.print(f"  Split into {len(segments)} segments")
 
             console.print("[bold cyan]▶ Analyzing video segments with LLM (detailed)...[/]")
@@ -78,7 +76,7 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
         else:
             # Short enough: single upload
             console.print("[bold cyan]▶ Preparing video for detailed analysis...[/]")
-            upload_path = prepare_video_for_upload(source_video, _tmp, settings.video_max_mb)
+            upload_path = prepare_video_for_upload(source_video, work, settings.video_max_mb)
             size_mb = upload_path.stat().st_size / (1024 * 1024)
             console.print(f"  Video ready ({size_mb:.1f} MB)")
 
@@ -90,10 +88,8 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
             )
     else:
         # ── Fast mode: extract keyframes ──────────────────────────────────
-        from v2g.video.extractor import extract as smart_extract
-
         console.print("[bold cyan]▶ Extracting frames...[/]")
-        frames = smart_extract(source)
+        frames = extract(source_video, work)
         console.print(f"  Extracted {len(frames)} frames")
 
         console.print("[bold cyan]▶ Analyzing video with LLM...[/]")
@@ -102,12 +98,65 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
             instruct=instruct,
             transcript=format_transcript(transcript_lines) or None,
         )
+    return design
+
+
+def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, instruct: str | None = None) -> Path:
+    """Execute the full pipeline and return the generated project path.
+
+    Args:
+        source: Local video file path or URL.
+        output_dir: Override run directory (default: projects/<timestamp>_<source>/).
+        detailed: If True, send full video to LLM for deep analysis.
+        instruct: Optional style instruction (e.g. "medieval theme", "vampire style").
+
+    Returns:
+        Path to the generated Godot project directory.
+    """
+    # Every run gets its own project directory FIRST — logs, work files, raw
+    # LLM responses and the generated game all live under it.
+    run_dir = runlog.start_run(source, output_dir)
+    console.print(f"[bold cyan]▶ Run directory:[/] {run_dir}")
+    work = runlog.work_dir()
+
+    # Resolve video source once (avoid double download for URLs)
+    source_video = resolve_source(source, work)
+
+    # ── Source-language dialogue: subtitles are the only authoritative source ──
+    transcript_lines: list[TranscriptLine] = extract_dialogue(source_video)
+    if transcript_lines:
+        console.print(f"[bold cyan]▶ Transcript:[/] {len(transcript_lines)} subtitle lines from source video")
+        log.info("Transcript: %d subtitle lines", len(transcript_lines))
+    else:
+        console.print("[yellow]▶ No subtitles found — source-language lines will be left empty[/]")
+        log.info("Transcript: none found — source-language lines will be left empty")
+
+    # ── Analyze layer: checkpoint first, LLM only on a miss ─────────────────
+    key = analysis_key(
+        source_video, transcript_lines, detailed=detailed, instruct=instruct
+    )
+    design = load_checkpoint(run_dir, key)
+    if design is not None:
+        console.print("[bold cyan]▶ Analysis checkpoint:[/] design.json reused, LLM skipped")
+        log.info("Analysis checkpoint hit (key=%.12s) — LLM skipped", key)
+    else:
+        design = _analyze(
+            source_video, work, transcript_lines, detailed=detailed, instruct=instruct
+        )
+        save_checkpoint(run_dir, design, key)
+        log.info("Analysis complete; checkpoint saved (key=%.12s)", key)
 
     _print_design(design, instruct)
+    log.info(
+        "Design analyzed: title=%r genre=%r characters=%d objects=%d scenes=%d dialogue=%d",
+        design.title, design.genre, len(design.characters), len(design.objects),
+        len(design.scenes), len(design.dialogue_samples),
+    )
 
-    # ── Generate Godot project ────────────────────────────────────────────
+    # ── Generate Godot project (into the run directory) ──────────────────────
     console.print("[bold cyan]▶ Generating Godot project...[/]")
-    project_path = generate(design, output_dir, video_path=source_video)
+    project_path = generate(design, run_dir, video_path=source_video)
     console.print(f"  [bold green]✓[/] Project created at [link=file://{project_path}]{project_path}[/link]")
+    log.info("Project created at %s", project_path)
 
     return project_path

@@ -10,7 +10,6 @@ The pipeline auto-selects based on video duration.
 
 import logging
 import subprocess
-import tempfile
 from pathlib import Path
 
 from v2g.config import settings
@@ -50,17 +49,18 @@ def _download_url(url: str, dest: Path) -> Path:
     raise FileNotFoundError(f"yt-dlp produced no video file in {dest}")
 
 
-def resolve_source(source: str) -> tuple[Path, Path]:
-    """Resolve *source* to a local video path. Returns (video_path, tmp_dir).
+def resolve_source(source: str, work_dir: Path) -> Path:
+    """Resolve *source* to a local video path inside *work_dir*.
 
-    The caller must keep *tmp_dir* alive for the duration of use.
+    URL downloads (and their subtitle sidecars) land in *work_dir* so every
+    artifact of a run lives under the run directory.
     """
-    tmp = Path(tempfile.mkdtemp(prefix="v2g_"))
+    work_dir.mkdir(parents=True, exist_ok=True)
     src = Path(source)
     if src.is_file():
-        return src, tmp
+        return src
     if source.startswith(("http://", "https://")):
-        return _download_url(source, tmp), tmp
+        return _download_url(source, work_dir)
     raise FileNotFoundError(f"Not a file or URL: {source}")
 
 
@@ -92,7 +92,7 @@ def extract_frames(video_path: Path, out_dir: Path, interval: float = 2.0) -> li
             "ffmpeg", "-y",
             "-i", str(video_path),
             "-vf", f"fps={fps}",
-            "-vsync", "vfr",
+            "-fps_mode", "vfr",
             str(out_dir / "frame_%04d.png"),
         ],
         check=True,
@@ -192,7 +192,7 @@ def _run_scene_extract(video_path: Path, out_dir: Path, threshold: float) -> Non
             "ffmpeg", "-y",
             "-i", str(video_path),
             "-vf", f"select='gt(scene,{threshold:.2f})',setpts=N/FRAME_RATE/TB",
-            "-vsync", "vfr",
+            "-fps_mode", "vfr",
             "-q:v", "2",
             str(out_dir / "frame_%04d.png"),
         ],
@@ -310,14 +310,14 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
 # ── Legacy convenience ───────────────────────────────────────────────────────
 
 
-def extract(source: str) -> list[Path]:
-    """Extract frames using the best strategy for the video length.
+def extract(video_path: Path, work_dir: Path) -> list[Path]:
+    """Extract frames for *video_path* using the best strategy for its length.
 
     Short video (<5 min): fixed-interval extraction.
     Long video (≥5 min): scene-detect keyframe extraction.
+    Frames are written under *work_dir*.
     """
-    video_path, tmp = resolve_source(source)
-    frames_dir = tmp / "frames"
+    frames_dir = work_dir / "frames"
     duration = _get_duration(video_path)
 
     if duration > 300:  # >5 minutes → scene detection

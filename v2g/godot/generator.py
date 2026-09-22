@@ -82,33 +82,58 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
     Returns a dict of {filename: source_code}. On any failure, returns empty dict
     so the caller can fall back to templates.
     """
+    from v2g import cache, runlog
+
     design_json = design.model_dump_json(indent=2)
-    raw = chat(T.LLM_SCRIPT_SYSTEM, [design_json], max_tokens=16384, temperature=0.3)
-    cleaned = _strip_md_fences(raw)
+    res = chat(T.LLM_SCRIPT_SYSTEM, [design_json], max_tokens=16384, temperature=0.3)
+    parsed = _try_load_scripts(res.text)
+    if parsed is None and res.cached:
+        # Only a cached answer gets one refill; a fresh malformed response
+        # is not worth re-requesting (template fallback is cheap).
+        cache.invalidate(res.key)
+        log.warning("Discarded invalid cached scripts response; refetching once")
+        res = chat(
+            T.LLM_SCRIPT_SYSTEM, [design_json],
+            max_tokens=16384, temperature=0.3, refresh=True,
+        )
+        parsed = _try_load_scripts(res.text)
+    dump = runlog.llm_dump("scripts", res.text)  # keep the raw response either way
 
     scripts: dict[str, str] = {}
-    try:
-        parsed = json.loads(cleaned)
-        if not isinstance(parsed, dict):
-            log.warning("LLM returned non-dict for scripts: %s", type(parsed).__name__)
-            return scripts
-        for fname, source in parsed.items():
-            if not isinstance(source, str):
-                continue
-            safe_fname = fname if fname.endswith(".gd") else f"{fname}.gd"
-            if safe_fname == "vn_manager.gd":
-                log.info("Ignoring LLM vn_manager.gd — the VN runtime is template-owned")
-                continue
-            # Basic sanity: must start with extends or @tool or @export or class_name
-            stripped = source.lstrip()
-            if not any(stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name")):
-                log.warning("Skipping %s: doesn't look like GDScript", safe_fname)
-                continue
-            scripts[safe_fname] = source
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        log.warning("Failed to parse LLM scripts: %s", e)
+    if parsed is None:
+        log.warning(
+            "Failed to parse LLM scripts%s",
+            f" — raw saved to {dump}" if dump else "",
+        )
+        return scripts
+    for fname, source in parsed.items():
+        if not isinstance(source, str):
+            continue
+        safe_fname = fname if fname.endswith(".gd") else f"{fname}.gd"
+        if safe_fname == "vn_manager.gd":
+            log.info("Ignoring LLM vn_manager.gd — the VN runtime is template-owned")
+            continue
+        # Basic sanity: must start with extends or @tool or @export or class_name
+        stripped = source.lstrip()
+        if not any(stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name")):
+            log.warning("Skipping %s: doesn't look like GDScript", safe_fname)
+            continue
+        scripts[safe_fname] = source
 
     return scripts
+
+
+def _try_load_scripts(text: str) -> dict | None:
+    """Parse the scripts JSON envelope; None = unusable (parse layer)."""
+    try:
+        data = json.loads(_strip_md_fences(text))
+    except json.JSONDecodeError as e:
+        log.debug("scripts JSON decode failed: %s", e)
+        return None
+    if not isinstance(data, dict):
+        log.warning("LLM returned non-dict for scripts: %s", type(data).__name__)
+        return None
+    return data
 
 
 def _ensure_essentials(
@@ -134,14 +159,15 @@ def _ensure_essentials(
 
 def generate(
     design: GameDesign,
-    project_root: Path | None = None,
+    project_root: Path,
     video_path: Path | None = None,
 ) -> Path:
     """Create a full Godot project directory. Returns the project path.
 
     Args:
         design: The game design document.
-        project_root: Override project directory.
+        project_root: Directory to write the project into — the run directory
+            created by ``runlog.start_run`` at pipeline start.
         video_path: Source video for asset extraction. If provided, frames are
             extracted as sprites/backgrounds and placed in assets/.
 

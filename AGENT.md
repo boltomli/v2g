@@ -32,7 +32,10 @@ Video (file / URL)
                          Godot Project Generator  (visual novel)
                                  │  └─ Godot import + headless boot (self-check)
                                  ▼
-                          projects/<title>/
+                          projects/<run-id>/         (fresh directory per run)
+                          ├── v2g.log               (full run log)
+                          ├── work/                 (downloads, frames, segments)
+                          ├── llm/                  (raw LLM responses)
                           ├── project.godot        (advance input only)
                           ├── main.tscn            (Control root + GameManager)
                           ├── vn_manager.gd        (template-owned VN runtime,
@@ -70,11 +73,25 @@ Sends the full video file directly to a video-capable LLM.
 
 All via env vars or `.env`:
 
+Every CLI run creates a fresh `projects/<timestamp>_<source>/` directory before
+any work starts; `v2g.log`, `work/` (downloads/frames/segments), `llm/` (raw
+model responses) and the generated game all live inside it, so deleting that
+one directory removes every artifact of the run. `-o` overrides the directory.
+
+The pipeline is layered (extract → analyze → generate) with two caches so
+retries are never pointless: `projects/.v2g_cache/` holds raw LLM responses
+keyed by the exact request (model, prompts, file contents, sampling params) —
+rerunning the same source makes zero API calls; `<run>/design.json` is an
+analysis checkpoint, so rerunning with the same `-o` skips the LLM entirely.
+Only a *cached* answer that fails parsing/refreshes once is invalidated and
+refetched; a fresh malformed response is never re-requested.
+
 | Variable | Default | Description |
 |---|---|---|
 | `V2G_LLM_API_KEY` | — | API key (**required**) |
 | `V2G_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `V2G_LLM_MODEL` | `gpt-4o` | Model name |
+| `V2G_LLM_CACHE` | `1` | Content-addressed raw-response cache across runs (`0` disables) |
 | `V2G_GODOT_PATH` | `godot` | Godot executable path |
 | `V2G_MAX_DURATION` | `120` | Max single-upload seconds (detail mode) |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between frames (short video fast mode) |
