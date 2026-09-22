@@ -608,6 +608,10 @@ GODOT 4.x RULES:
 - No `yield` — use `await` for coroutines
 - Input: `Input.is_action_just_pressed("advance")`
 - Autoload-free: access siblings via `get_node("/root/Main/GameManager")`
+- `CanvasLayer` visibility is the inherited `visible` property; never invent `_visible`
+- Conditional values use `value_if_true if condition else value_if_false`; boolean
+  `and` / `or` operands must both be booleans
+- `Object.set()` property names must be `String` or `StringName`, never `NodePath`
 
 CODE QUALITY:
 - Self-contained scripts — no external dependencies beyond Godot built-ins
