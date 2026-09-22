@@ -7,7 +7,7 @@
 ```
 Video (file / URL)
   │
-  ├─ URL: yt-dlp downloads video + subtitles (.srt sidecars) ─┐
+  ├─ URL: yt-dlp downloads video + best-effort .srt sidecars (media cache) ─┐
   │                                                            ▼
   │                                          Transcript extraction (ffmpeg)
   │                                           └─ source-language lines ONLY
@@ -34,7 +34,7 @@ Video (file / URL)
                                  ▼
                           projects/<run-id>/         (fresh directory per run)
                           ├── v2g.log               (full run log)
-                          ├── work/                 (downloads, frames, segments)
+                          ├── work/                 (frames; downloads/segments when media cache off)
                           ├── llm/                  (raw LLM responses)
                           ├── project.godot        (advance input only)
                           ├── main.tscn            (Control root + GameManager)
@@ -81,7 +81,10 @@ one directory removes every artifact of the run. `-o` overrides the directory.
 The pipeline is layered (extract → analyze → generate) with two caches so
 retries are never pointless: `projects/.v2g_cache/` holds raw LLM responses
 keyed by the exact request (model, prompts, file contents, sampling params) —
-rerunning the same source makes zero API calls; `<run>/design.json` is an
+rerunning the same source makes zero API calls; its `media/` subtree holds
+downloaded videos and re-encoded intermediates keyed by URL or source file +
+settings, so reruns skip downloads and transcodes (`V2G_MEDIA_CACHE=0` sends
+those artifacts to `work/` instead); `<run>/design.json` is an
 analysis checkpoint, so rerunning with the same `-o` skips the LLM entirely.
 Only a *cached* answer that fails parsing/refreshes once is invalidated and
 refetched; a fresh malformed response is never re-requested.
@@ -92,6 +95,7 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `V2G_LLM_MODEL` | `gpt-4o` | Model name |
 | `V2G_LLM_CACHE` | `1` | Content-addressed raw-response cache across runs (`0` disables) |
+| `V2G_MEDIA_CACHE` | `1` | Download/transcode artifact cache across runs (`0` disables) |
 | `V2G_GODOT_PATH` | `godot` | Godot executable path |
 | `V2G_MAX_DURATION` | `120` | Max single-upload seconds (detail mode) |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between frames (short video fast mode) |
@@ -110,7 +114,8 @@ enforced in the analyzer prompts and the generator:
   template-authored UI strings (hints, score label, end card) are Chinese-only.
 - **Source language comes from the video, never from the LLM.** `line` may only
   contain lines transcribed from the source material. The pipeline extracts
-  subtitles (sidecar `.srt`/`.vtt`/`.ass`, or the embedded subtitle stream) and
+  subtitles (sidecar `.srt`/`.vtt`/`.ass` — bare or language-tagged like
+  `.en.srt`, which is what yt-dlp writes — or the embedded subtitle stream) and
   injects the transcript into every analysis mode; LLM prompts mark it
   authoritative and require `line` to stay EMPTY when no transcript exists.
 - Choice options are player-authored UI text: Chinese-only, unless the exact

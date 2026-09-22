@@ -9,51 +9,102 @@ The pipeline auto-selects based on video duration.
 """
 
 import logging
+import math
 import subprocess
 from pathlib import Path
 
+from v2g import cache
 from v2g.config import settings
 
 log = logging.getLogger(__name__)
+
+_VIDEO_SUFFIXES = (".mp4", ".mkv", ".webm", ".mov")
 
 
 # ── Source resolution ────────────────────────────────────────────────────────
 
 
-def _download_url(url: str, dest: Path) -> Path:
-    """Download a video from *url* into *dest* via yt-dlp and return the file path.
+def _run_yt_dlp(args: list[str]) -> str | None:
+    """Run yt-dlp once; None on success, else a short failure description."""
+    result = subprocess.run(args, capture_output=True)
+    if result.returncode == 0:
+        return None
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    return f"exit {result.returncode}: {lines[-1] if lines else 'no output'}"
 
-    Subtitles (including auto-generated ones) are downloaded next to the video
-    as SRT sidecars — they are the authoritative source-language dialogue.
+
+def _usable_video(directory: Path) -> Path | None:
+    """Complete, ffprobe-readable ``video.<ext>`` in *directory*, else None.
+
+    Rejects yt-dlp intermediates (``video.f137.mp4`` fragments, ``.part``
+    files) and truncated merges left behind by a failed attempt.
     """
-    out_tpl = str(dest / "video.%(ext)s")
-    subprocess.run(
-        [
-            "yt-dlp",
-            "--no-playlist",
-            "-f", "bv*+ba/b",
-            "--merge-output-format", "mp4",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs", "all,-live",
-            "--convert-subs", "srt",
-            "-o", out_tpl,
-            url,
-        ],
-        check=True,
-        capture_output=True,
+    video = next(
+        (
+            f
+            for f in directory.iterdir()
+            if f.stem == "video"
+            and f.suffix.lower() in _VIDEO_SUFFIXES
+            and f.stat().st_size > 0
+        ),
+        None,
     )
-    for f in dest.iterdir():
-        if f.suffix in (".mp4", ".mkv", ".webm", ".mov"):
-            return f
-    raise FileNotFoundError(f"yt-dlp produced no video file in {dest}")
+    if video is None:
+        return None
+    try:
+        _get_duration(video)
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
+    return video
+
+
+def _download_url(url: str, work_dir: Path) -> Path:
+    """Download *url* via yt-dlp into the media cache and return the video file.
+
+    The download is cached across runs keyed by URL — rerunning the same
+    source never re-downloads. Subtitles (including auto-generated ones) are
+    best-effort: fetched first as SRT sidecars next to the video (danmaku
+    bullet-screen XML is excluded — it is not dialogue), and any yt-dlp
+    failure falls back to a subtitle-less retry; a completed video from a
+    failed attempt is kept when ffprobe validates it. *work_dir* is the
+    fallback location when ``V2G_MEDIA_CACHE=0``.
+    """
+    entry = cache.media_entry("dl", {"url": url}, fallback=work_dir)
+    hit = cache.media_find(entry, _usable_video)
+    if hit is not None:
+        log.info("Download cache hit: %s → %s", url, hit)
+        return hit
+
+    base = ["yt-dlp", "--no-playlist", "-f", "bv*+ba/b", "--merge-output-format", "mp4"]
+    sub_args = [
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs", "all,-live,-danmaku",
+        "--convert-subs", "srt",
+    ]
+    with cache.media_stage(entry) as stage:
+        out_tpl = str(stage / "video.%(ext)s")
+        err = _run_yt_dlp([*base, *sub_args, "-o", out_tpl, url])
+        if err is not None:
+            log.warning("yt-dlp with subtitles failed (%s) — retrying without subtitles", err)
+            err = _run_yt_dlp([*base, "-o", out_tpl, url])
+        video = _usable_video(stage)
+        if video is None:
+            detail = f": {err}" if err else ""
+            raise FileNotFoundError(f"yt-dlp produced no usable video for {url}{detail}")
+        if err is not None:
+            log.warning("yt-dlp exited with %s — keeping the video it produced", err)
+        name = video.name
+    return entry / name
 
 
 def resolve_source(source: str, work_dir: Path) -> Path:
-    """Resolve *source* to a local video path inside *work_dir*.
+    """Resolve *source* to a local video path.
 
-    URL downloads (and their subtitle sidecars) land in *work_dir* so every
-    artifact of a run lives under the run directory.
+    URL downloads (and their subtitle sidecars) land in the shared media
+    cache ``<output_root>/.v2g_cache/media/`` so reruns never re-download;
+    *work_dir* is only the fallback location when ``V2G_MEDIA_CACHE=0``.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     src = Path(source)
@@ -209,39 +260,138 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) ->
 
     Returns a list of segment file paths in order.
     Used for detail-mode analysis of long videos that exceed LLM upload limits.
+
+    Segments are cached across runs, keyed by source identity (size + mtime)
+    and the split/compression settings — reruns skip the re-cut entirely.
+    *tmp_dir* is only the fallback location when ``V2G_MEDIA_CACHE=0``.
     """
     duration = _get_duration(video_path)
     if duration <= segment_duration:
         return [video_path]
 
-    segments: list[Path] = []
-    seg_idx = 0
-    start = 0.0
+    count = math.ceil(duration / segment_duration)
+    names = [f"segment_{i:03d}.mp4" for i in range(count)]
+    stat = video_path.stat()
+    entry = cache.media_entry(
+        "split",
+        {
+            "source_size": stat.st_size,
+            "source_mtime": stat.st_mtime_ns,
+            "segment_duration": segment_duration,
+            "video_max_mb": settings.video_max_mb,
+        },
+        fallback=tmp_dir,
+    )
 
-    while start < duration:
-        seg_path = tmp_dir / f"segment_{seg_idx:03d}.mp4"
-        end = min(start + segment_duration, duration)
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-ss", f"{start:.2f}",
-                "-i", str(video_path),
-                "-t", f"{end - start:.2f}",
-                "-c", "copy",
-                str(seg_path),
-            ],
-            capture_output=True,
-            check=True,
-        )
-        # Compress segment if too large for upload
-        size_mb = seg_path.stat().st_size / (1024 * 1024)
-        if size_mb > settings.video_max_mb:
-            compressed = tmp_dir / f"segment_{seg_idx:03d}_c.mp4"
-            target_bitrate = int(settings.video_max_mb * 8 * 1024 / segment_duration)
+    def probe(directory: Path) -> Path | None:
+        first = directory / names[0]
+        return first if all((directory / n).is_file() for n in names) else None
+
+    hit = cache.media_find(entry, probe)
+    if hit is not None:
+        log.info("Segment cache hit: %d segments from %s", count, video_path.name)
+        return [entry / n for n in names]
+
+    with cache.media_stage(entry) as stage:
+        seg_idx = 0
+        start = 0.0
+
+        while start < duration:
+            seg_path = stage / names[seg_idx]
+            end = min(start + segment_duration, duration)
             subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-i", str(seg_path),
+                    "-ss", f"{start:.2f}",
+                    "-i", str(video_path),
+                    "-t", f"{end - start:.2f}",
+                    "-c", "copy",
+                    str(seg_path),
+                ],
+                capture_output=True,
+                check=True,
+            )
+            # Compress segment if too large for upload
+            size_mb = seg_path.stat().st_size / (1024 * 1024)
+            if size_mb > settings.video_max_mb:
+                compressed = stage / "compressed.mp4"
+                target_bitrate = int(settings.video_max_mb * 8 * 1024 / segment_duration)
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", str(seg_path),
+                        "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                        "-b:v", f"{target_bitrate}k",
+                        "-b:a", "64k",
+                        "-preset", "fast",
+                        str(compressed),
+                    ],
+                    capture_output=True,
+                    check=True,
+                )
+                compressed.replace(seg_path)
+
+            log.info("  Segment %d: %.0fs–%.0fs (%.1f MB)",
+                     seg_idx, start, end, seg_path.stat().st_size / (1024 * 1024))
+            start = end
+            seg_idx += 1
+
+    return [entry / n for n in names]
+
+
+# ── Video preparation for LLM upload ─────────────────────────────────────────
+
+
+def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) -> Path:
+    """Prepare video for LLM upload: trim to max_duration, compress if over max_mb.
+
+    Returns path to the processed video file. The output is cached across runs,
+    keyed by source identity (size + mtime) and the trim/compression settings —
+    reruns skip the re-encode. *tmp_dir* is only the fallback location when
+    ``V2G_MEDIA_CACHE=0``.
+    """
+    stat = video_path.stat()
+    entry = cache.media_entry(
+        "prep",
+        {
+            "source_size": stat.st_size,
+            "source_mtime": stat.st_mtime_ns,
+            "max_mb": max_mb,
+            "max_duration": settings.max_duration,
+        },
+        fallback=tmp_dir,
+    )
+
+    def probe(directory: Path) -> Path | None:
+        upload = directory / "upload.mp4"
+        return upload if upload.is_file() and upload.stat().st_size > 0 else None
+
+    hit = cache.media_find(entry, probe)
+    if hit is not None:
+        log.info("Prepared-video cache hit: %s", hit)
+        return hit
+
+    with cache.media_stage(entry) as stage:
+        duration = _get_duration(video_path)
+        max_dur = settings.max_duration
+
+        # Step 1: trim duration if needed
+        upload = stage / "upload.mp4"
+        trim_args: list[str] = ["ffmpeg", "-y", "-i", str(video_path)]
+        if duration > max_dur:
+            trim_args += ["-t", str(max_dur)]
+        trim_args += ["-c", "copy", str(upload)]
+        subprocess.run(trim_args, capture_output=True, check=True)
+
+        # Step 2: compress if file is too large
+        size_mb = upload.stat().st_size / (1024 * 1024)
+        if size_mb > max_mb:
+            compressed = stage / "compressed.mp4"
+            target_bitrate = int(max_mb * 8 * 1024 / max_dur)  # kbps
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", str(upload),
                     "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
                     "-b:v", f"{target_bitrate}k",
                     "-b:a", "64k",
@@ -251,60 +401,9 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) ->
                 capture_output=True,
                 check=True,
             )
-            seg_path.unlink(missing_ok=True)
-            seg_path = compressed
+            compressed.replace(upload)
 
-        segments.append(seg_path)
-        log.info("  Segment %d: %.0fs–%.0fs (%.1f MB)",
-                 seg_idx, start, end, seg_path.stat().st_size / (1024 * 1024))
-        start = end
-        seg_idx += 1
-
-    return segments
-
-
-# ── Video preparation for LLM upload ─────────────────────────────────────────
-
-
-def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) -> Path:
-    """Prepare video for LLM upload: trim to max_duration, compress if over max_mb.
-
-    Returns path to the processed video file.
-    """
-    duration = _get_duration(video_path)
-    max_dur = settings.max_duration
-
-    # Step 1: trim duration if needed
-    trimmed = tmp_dir / "trimmed.mp4"
-    trim_args: list[str] = ["ffmpeg", "-y", "-i", str(video_path)]
-    if duration > max_dur:
-        trim_args += ["-t", str(max_dur)]
-    trim_args += ["-c", "copy", str(trimmed)]
-    subprocess.run(trim_args, capture_output=True, check=True)
-
-    current = trimmed
-
-    # Step 2: compress if file is too large
-    size_mb = current.stat().st_size / (1024 * 1024)
-    if size_mb > max_mb:
-        compressed = tmp_dir / "compressed.mp4"
-        target_bitrate = int(max_mb * 8 * 1024 / max_dur)  # kbps
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-i", str(current),
-                "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                "-b:v", f"{target_bitrate}k",
-                "-b:a", "64k",
-                "-preset", "fast",
-                str(compressed),
-            ],
-            capture_output=True,
-            check=True,
-        )
-        current = compressed
-
-    return current
+    return entry / "upload.mp4"
 
 
 # ── Legacy convenience ───────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o"
     llm_cache: bool = True  # content-addressed raw-response cache (V2G_LLM_CACHE=0 disables)
+    media_cache: bool = True  # shared download/transcode cache (V2G_MEDIA_CACHE=0 → artifacts go to the run's work dir)
 
     # Godot
     godot_path: str = "godot"

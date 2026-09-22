@@ -33,7 +33,7 @@ Two analysis modes:
 | Output fields | Core design | + physics, behavior, layout, progression |
 | Cost / speed | Lower / faster | Higher / slower |
 
-1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg); pulls subtitles (sidecar or embedded) as the source-language transcript.
+1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg); pulls subtitles (sidecar or embedded) as the source-language transcript when available.
 2. **Analyze** — Sends to multimodal LLM with the transcript injected; returns a structured game design with bilingual dialogue.
 3. **Generate** — Scaffolds a visual-novel Godot 4.x project (`project.godot`, `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`), compile-checks every script (one LLM repair pass, then fallback, on parse errors), then runs Godot headless to import assets and self-check.
 
@@ -73,9 +73,12 @@ Every run gets its own `projects/<timestamp>_<source>/` directory holding
 `v2g.log`, `work/`, `llm/` and the game — delete it to remove the whole run.
 Layered caching avoids pointless retries: `projects/.v2g_cache/` stores raw
 LLM responses keyed by exact request content (reruns make zero API calls;
-`V2G_LLM_CACHE=0` disables), and `<run>/design.json` lets a rerun with the
-same `-o` skip analysis entirely. Only a cached answer that fails validation
-is refetched.
+`V2G_LLM_CACHE=0` disables) **and** downloaded videos / re-encoded
+intermediates keyed by URL or source file + settings (`V2G_MEDIA_CACHE=0`
+disables — artifacts then go to the run's `work/`), so rerunning a source
+skips both downloads and transcodes; `<run>/design.json` lets a rerun with
+the same `-o` skip analysis entirely. Only a cached answer that fails
+validation is refetched.
 
 Then open the generated project in Godot:
 
@@ -93,6 +96,7 @@ All settings via environment variables (or `.env` file):
 | `V2G_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `V2G_LLM_MODEL` | `gpt-4o` | Model name |
 | `V2G_LLM_CACHE` | `1` | Cache raw LLM responses across runs (`0` disables) |
+| `V2G_MEDIA_CACHE` | `1` | Cache downloads/transcodes across runs (`0` disables) |
 | `V2G_GODOT_PATH` | `godot` | Godot executable |
 | `V2G_MAX_DURATION` | `120` | Max video seconds (detail mode) |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between extracted frames (fast mode) |

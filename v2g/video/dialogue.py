@@ -106,13 +106,33 @@ def _embedded_subtitles(video_path: Path) -> str | None:
         dst.unlink(missing_ok=True)
 
 
+def _sidecar_candidates(video_path: Path) -> list[Path]:
+    """Subtitle sidecar files for *video_path*, best candidate first.
+
+    Matches both ``clip.srt`` (hand-placed) and yt-dlp's language-tagged
+    ``clip.<lang>.srt`` forms — URL downloads only ever produce the tagged
+    names. Order: format priority (.srt first), exact stem before
+    language-tagged, then name, so the pick is deterministic when several
+    languages are present. Danmaku XML (``clip.danmaku.xml``) is not in
+    ``_SIDECAR_SUFFIXES`` and is never read as dialogue.
+    """
+    stem = video_path.stem
+    rank = {suffix: i for i, suffix in enumerate(_SIDECAR_SUFFIXES)}
+    candidates = [
+        p
+        for p in video_path.parent.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in rank
+        and (p.stem == stem or p.stem.startswith(f"{stem}."))
+    ]
+    candidates.sort(key=lambda p: (rank[p.suffix.lower()], p.stem != stem, p.name))
+    return candidates
+
+
 def extract_dialogue(video_path: Path) -> list[TranscriptLine]:
     """Return all subtitle cues available for *video_path* (empty list if none)."""
     # 1. Sidecar subtitle files written next to the video
-    for suffix in _SIDECAR_SUFFIXES:
-        side = video_path.with_suffix(suffix)
-        if not side.is_file():
-            continue
+    for side in _sidecar_candidates(video_path):
         if side.suffix.lower() == ".srt":
             text = side.read_text(encoding="utf-8", errors="replace")
         else:

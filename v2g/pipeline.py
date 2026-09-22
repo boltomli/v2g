@@ -119,7 +119,7 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
     console.print(f"[bold cyan]▶ Run directory:[/] {run_dir}")
     work = runlog.work_dir()
 
-    # Resolve video source once (avoid double download for URLs)
+    # Resolve video source once (URL downloads are cached across runs)
     source_video = resolve_source(source, work)
 
     # ── Source-language dialogue: subtitles are the only authoritative source ──
