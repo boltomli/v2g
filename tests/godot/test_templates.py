@@ -100,3 +100,13 @@ def test_llm_prompt_forbids_template_owned_files():
     assert "NEVER generate" in prompt
     assert "score_changed" in prompt
     assert '"advance"' in prompt
+
+
+def test_viewport_follows_video_aspect():
+    """Window matches the source video so the frame fills edge to edge."""
+    assert T.viewport_for((1920, 1080)) == (1280, 720)   # landscape unchanged
+    assert T.viewport_for((1080, 1922)) == (720, 1280)    # source video: portrait
+    assert T.viewport_for(None) == (1280, 720)            # unknown → default
+    assert T.viewport_for((0, 1080)) == (1280, 720)       # invalid → default
+    # Extreme aspect ratio: usable window wins over exact match (letterbox there)
+    assert T.viewport_for((8000, 1000)) == (1280, 480)

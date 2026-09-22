@@ -30,7 +30,7 @@ Video (file / URL)
   └──────────────────────────────┼───────────────────────────────┘
                                  ▼
                          Godot Project Generator  (visual novel)
-                                 │  └─ Godot import + headless boot (self-check)
+                                 │  └─ Godot script check + repair, import, headless boot (self-check)
                                  ▼
                           projects/<run-id>/         (fresh directory per run)
                           ├── v2g.log               (full run log)
@@ -197,7 +197,7 @@ class DialogueChoice:
 
 | File | Source | Description |
 |---|---|---|
-| `project.godot` | template | Engine config, window size, `advance` input (Space/Enter) |
+| `project.godot` | template | Engine config, window size matching the source video's aspect (ffprobe; 1280x720 fallback), `advance` input (Space/Enter) |
 | `main.tscn` | template | Visual-novel root: `Control` (vn_manager.gd) + `GameManager` |
 | `vn_manager.gd` | template | VN runtime: embedded bilingual story, dialogue box (source line + Chinese subtitle), choices, portraits, background flashes, restart |
 | `game_manager.gd` | LLM | Game state honoring the `score_changed`/`add_score` contract (template fallback) |
@@ -208,8 +208,12 @@ class DialogueChoice:
 | `assets/scene_*.png` | ffmpeg | Additional scene backgrounds for multi-scene videos |
 | `game_design.json` | analyzer | Full design document as project metadata |
 
-After writing files, the generator runs Godot headless twice (import scan, then
-a boot) so missing assets or script errors surface at **generation time**.
+After writing files, the generator compile-checks every script with
+`godot --check-only` (the boot only parses scripts the main scene references),
+repairs parse failures with one follow-up LLM pass, and falls back for what
+still fails (`game_manager.gd` → template, unreferenced extras dropped), then
+runs Godot headless twice (import scan, then a boot) — missing assets or
+script errors surface at **generation time**.
 
 ### Asset extraction
 

@@ -61,6 +61,123 @@ def _finalize_with_godot(project_root: Path) -> None:
             log.info("Godot %s OK", what)
 
 
+def _gd_source_ok(source: str) -> bool:
+    """Sanity: the text must actually look like GDScript."""
+    stripped = source.lstrip()
+    return any(
+        stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name")
+    )
+
+
+def _check_script(project_root: Path, fname: str) -> list[str] | None:
+    """Compile-check one script with Godot; [] = clean, None = Godot unavailable.
+
+    The headless boot only parses scripts the main scene references, so LLM
+    extras (alliance/save overlays) would otherwise ship with parse errors
+    that only surface when someone opens the project in the editor.
+    """
+    try:
+        result = subprocess.run(
+            [settings.godot_path, "--headless", "--path", str(project_root),
+             "--check-only", "--script", f"res://{fname}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("Script compile check skipped: %s", e)
+        return None
+    output = (result.stdout or "") + (result.stderr or "")
+    return [
+        ln for ln in output.splitlines()
+        if "SCRIPT ERROR" in ln or "Parse Error" in ln or "ERROR: Failed" in ln
+    ]
+
+
+def _repair_scripts(
+    design: GameDesign, scripts: dict[str, str], failures: dict[str, list[str]]
+) -> dict[str, str]:
+    """One follow-up LLM pass returning corrected source for failing files only."""
+    from v2g import runlog
+
+    report = "\n\n".join(
+        f"## {fname}\nGodot compile check said:\n" + "\n".join(errs)
+        + f"\n\nCurrent source:\n```gdscript\n{scripts[fname]}\n```"
+        for fname, errs in failures.items()
+    )
+    ask = (
+        "These files failed Godot's compile check. Return a JSON object mapping "
+        "filename to its corrected full source, ONLY for the files below "
+        "(same output format as before):\n\n" + report
+    )
+    res = chat(
+        T.LLM_SCRIPT_SYSTEM,
+        [design.model_dump_json(indent=2), ask],
+        max_tokens=16384,
+        temperature=0.3,
+    )
+    runlog.llm_dump("scripts_repair", res.text)
+    parsed = _try_load_scripts(res.text)
+    if parsed is None:
+        log.warning("Script repair response unusable — falling back")
+        return {}
+    repaired: dict[str, str] = {}
+    for fname, source in parsed.items():
+        if not isinstance(source, str):
+            continue
+        safe_fname = fname if fname.endswith(".gd") else f"{fname}.gd"
+        if safe_fname in failures and _gd_source_ok(source):
+            repaired[safe_fname] = source
+    return repaired
+
+
+def _validate_scripts(
+    project_root: Path, design: GameDesign, scripts: dict[str, str]
+) -> dict[str, str]:
+    """Compile-check every script, repair once, then fall back — no parse
+    error ships. Keeps files on disk in sync with the returned dict.
+    """
+    failures: dict[str, list[str]] = {}
+    for fname in scripts:
+        errs = _check_script(project_root, fname)
+        if errs is None:
+            return scripts  # Godot unavailable — nothing to enforce
+        if errs:
+            failures[fname] = errs
+            log.warning("Parse errors in %s:\n%s", fname, "\n".join(errs))
+    if not failures:
+        return scripts
+
+    repairable = {f: e for f, e in failures.items() if f != "vn_manager.gd"}
+    if repairable:
+        for fname, source in _repair_scripts(design, scripts, repairable).items():
+            log.info("LLM repair fixed %s", fname)
+            (project_root / fname).write_text(source, encoding="utf-8")
+            scripts[fname] = source
+
+    for fname in list(failures):
+        errs = _check_script(project_root, fname)
+        if not errs:
+            continue  # repaired cleanly
+        if fname == "game_manager.gd":
+            log.warning("game_manager.gd still fails compile — using template")
+            scripts[fname] = T.game_manager_script(design)
+            (project_root / fname).write_text(scripts[fname], encoding="utf-8")
+        elif fname == "vn_manager.gd":
+            log.error(
+                "Template-owned vn_manager.gd fails compile:\n%s", "\n".join(errs)
+            )
+        elif any(fname in src for f, src in scripts.items() if f != fname):
+            log.error(
+                "Keeping %s despite parse errors — another script references it:\n%s",
+                fname, "\n".join(errs),
+            )
+        else:
+            log.warning("Dropping %s (parse errors, unreferenced):\n%s", fname, "\n".join(errs))
+            (project_root / fname).unlink(missing_ok=True)
+            del scripts[fname]
+    return scripts
+
+
 def _safe_name(title: str) -> str:
     """Sanitize a game title into a filesystem-safe directory name."""
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_").lower() or "game"
@@ -114,8 +231,7 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
             log.info("Ignoring LLM vn_manager.gd — the VN runtime is template-owned")
             continue
         # Basic sanity: must start with extends or @tool or @export or class_name
-        stripped = source.lstrip()
-        if not any(stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name")):
+        if not _gd_source_ok(source):
             log.warning("Skipping %s: doesn't look like GDScript", safe_fname)
             continue
         scripts[safe_fname] = source
@@ -187,10 +303,12 @@ def generate(
 
     # 1. Extract visual assets from video (if source video available)
     assets: dict[str, Path] = {}
+    video_size: tuple[int, int] | None = None
     if video_path and video_path.is_file():
         log.info("Extracting visual assets from video...")
-        from v2g.video.asset_extractor import extract_assets
+        from v2g.video.asset_extractor import extract_assets, probe_video_size
 
+        video_size = probe_video_size(video_path)
         assets_dir = project_root / "assets"
         assets = extract_assets(video_path, design, assets_dir)
         log.info("Extracted %d asset(s)", len(assets))
@@ -209,9 +327,10 @@ def generate(
     scripts = _ensure_essentials(scripts, design, assets)
     log.info("Generated %d script(s): %s", len(scripts), ", ".join(sorted(scripts)))
 
-    # 3. project.godot
+    # 3. project.godot — window aspect follows the source video
     (project_root / "project.godot").write_text(
-        T.project_dot_godot(design.title), encoding="utf-8"
+        T.project_dot_godot(design.title, *T.viewport_for(video_size)),
+        encoding="utf-8",
     )
 
     # 4. main.tscn — visual-novel root (vn_manager + GameManager)
@@ -228,7 +347,11 @@ def generate(
         design.model_dump_json(indent=2), encoding="utf-8"
     )
 
-    # 7. Import assets and boot once — errors surface at generation time
+    # 7. Compile-check every script — the boot below never parses scripts the
+    # main scene doesn't reference — repair/fallback so parse errors never ship
+    scripts = _validate_scripts(project_root, design, scripts)
+
+    # 8. Import assets and boot once — errors surface at generation time
     _finalize_with_godot(project_root)
 
     return project_root

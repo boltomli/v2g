@@ -35,7 +35,7 @@ Two analysis modes:
 
 1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg); pulls subtitles (sidecar or embedded) as the source-language transcript.
 2. **Analyze** — Sends to multimodal LLM with the transcript injected; returns a structured game design with bilingual dialogue.
-3. **Generate** — Scaffolds a visual-novel Godot 4.x project (`project.godot`, `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`), then runs Godot headless to import assets and self-check.
+3. **Generate** — Scaffolds a visual-novel Godot 4.x project (`project.godot`, `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`), compile-checks every script (one LLM repair pass, then fallback, on parse errors), then runs Godot headless to import assets and self-check.
 
 ## Prerequisites
 

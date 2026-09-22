@@ -9,6 +9,7 @@ Uses ffmpeg to:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import subprocess
 import zlib
@@ -71,6 +72,35 @@ def _get_video_duration(video_path: Path) -> float:
         capture_output=True, text=True, check=True,
     )
     return float(result.stdout.strip())
+
+
+def probe_video_size(video_path: Path) -> tuple[int, int] | None:
+    """First video stream's display (width, height); None when probing fails.
+
+    Honors a rotation side-data entry so phone-shot portrait footage stored
+    with landscape pixels still reports its displayed orientation.
+    """
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,side_data_list",
+             "-of", "json", str(video_path)],
+            capture_output=True, text=True, check=True,
+        )
+        streams = json.loads(result.stdout).get("streams") or []
+        if not streams:
+            return None
+        width = int(streams[0]["width"])
+        height = int(streams[0]["height"])
+        for side in streams[0].get("side_data_list") or []:
+            if int(side.get("rotation", 0)) % 180 != 0:
+                width, height = height, width
+                break
+        return width, height
+    except (
+        OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError,
+    ):
+        return None
 
 
 # ── Core extraction ──────────────────────────────────────────────────────────

@@ -67,6 +67,25 @@ renderer/rendering_method="gl_compatibility"
 """
 
 
+def viewport_for(
+    video_size: tuple[int, int] | None, long_side: int = 1280
+) -> tuple[int, int]:
+    """Window size matching the source video's aspect ratio (long side fixed).
+
+    Unknown/invalid size falls back to the 1280x720 default. The short side is
+    clamped to 480 px so extreme aspect ratios still get a usable window
+    (letterboxing only there — matched aspects fill edge to edge).
+    """
+    if not video_size:
+        return (long_side, 720)
+    vw, vh = video_size
+    if vw <= 0 or vh <= 0:
+        return (long_side, 720)
+    short = round(long_side * min(vw, vh) / max(vw, vh) / 2.0) * 2
+    short = max(short, 480)
+    return (long_side, short) if vw >= vh else (short, long_side)
+
+
 # ── UID generator ────────────────────────────────────────────────────────────
 
 
@@ -252,7 +271,7 @@ func _build_ui() -> void:
     add_child(_bg)
     _bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
     _bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    _bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+    _bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
     _bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
     _black = ColorRect.new()
