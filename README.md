@@ -80,7 +80,7 @@ is refetched.
 Then open the generated project in Godot:
 
 ```bash
-godot --editor projects/<run-id>
+godot --editor --path "projects/<run-id>"
 ```
 
 ## Configuration
