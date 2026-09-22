@@ -39,7 +39,13 @@ def _finalize_with_godot(project_root: Path) -> None:
     for cmd, what in steps:
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180, check=False,
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as e:
             log.warning("Godot %s skipped: %s", what, e)
