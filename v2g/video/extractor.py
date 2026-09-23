@@ -312,7 +312,7 @@ def _fit_size(path: Path, cap_mb: float) -> list[Path]:
     return _fit_size(children[0], cap_mb) + _fit_size(children[1], cap_mb)
 
 
-def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) -> list[Path]:
+def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 60) -> list[Path]:
     """Split a video into uploadable segments of *segment_duration* seconds.
 
     Each segment is cut with ``-c copy``, compressed at most once when it

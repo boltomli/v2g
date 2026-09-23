@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,12 +21,12 @@ class Settings(BaseSettings):
     godot_path: str = "godot"
 
     # Video extraction
-    max_duration: int = 120  # seconds — max single-upload duration for detail mode
+    max_duration: int = 120  # seconds — cap for a single analysis; detail-mode input beyond this is trimmed
     frame_interval: float = 2.0  # seconds between extracted frames (short videos)
     video_max_mb: int = 20  # max video size (MB) for direct upload to LLM
     frame_budget: int = 40  # max keyframes to send to LLM (long video cap)
     scene_threshold: float = 0.3  # ffmpeg scene-detect sensitivity (0.0–1.0, lower = more frames)
-    chunk_duration: int = 600  # seconds per analysis chunk for long videos (detail mode)
+    chunk_duration: int = 60  # seconds per analysis chunk (detail mode); must be ≤ max_duration
 
     # Image generation (reserved for future use)
     imagegen_api_key: str = ""
@@ -35,6 +36,17 @@ class Settings(BaseSettings):
 
     # Output
     output_root: Path = Path("projects")
+
+    @model_validator(mode="after")
+    def _chunk_fits_single_analysis(self) -> "Settings":
+        """A chunk is one analysis unit — it must fit inside the per-analysis cap."""
+        if self.chunk_duration > self.max_duration:
+            raise ValueError(
+                f"V2G_CHUNK_DURATION={self.chunk_duration} exceeds "
+                f"V2G_MAX_DURATION={self.max_duration}: chunk length must not "
+                "be greater than the single-analysis cap"
+            )
+        return self
 
 
 settings = Settings()

@@ -62,11 +62,12 @@ Extracts keyframe images and sends them to the LLM.
 ### Detail mode (`--detail` / `-d`)
 Sends the full video file directly to a video-capable LLM.
 - Requires a model that supports `video_url` content type
-- Short video (≤10 min): single upload, trimmed, compressed at most once, then losslessly
+- Short video (≤ `V2G_CHUNK_DURATION` + 30 s — 90 s at defaults): single upload, trimmed to
+  `V2G_MAX_DURATION` when longer, compressed at most once, then losslessly
   split by duration until every file fits `V2G_VIDEO_MAX_MB` (the cap is hard — compression
   output is verified, never assumed)
-- **Long video (>10 min): automatic chunked analysis** — splits into `V2G_CHUNK_DURATION`-second
-  segments (default 10 min each); each segment is compressed at most once, and any segment
+- **Long video (beyond that): automatic chunked analysis** — splits into `V2G_CHUNK_DURATION`-second
+  segments (default 60 s each); each segment is compressed at most once, and any segment
   still over `V2G_VIDEO_MAX_MB` is halved losslessly (stream copy, no re-encode) until it fits.
   Analyzes each segment separately, then merges results.
   Characters are deduplicated (most detailed version kept), scenes concatenated, mechanics unioned.
@@ -101,11 +102,11 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_LLM_CACHE` | `1` | Content-addressed raw-response cache across runs (`0` disables) |
 | `V2G_MEDIA_CACHE` | `1` | Download/transcode artifact cache across runs (`0` disables) |
 | `V2G_GODOT_PATH` | `godot` | Godot executable path |
-| `V2G_MAX_DURATION` | `120` | Max single-upload seconds (detail mode) |
+| `V2G_MAX_DURATION` | `120` | Max seconds per single analysis; longer detail-mode input is trimmed to this |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between frames (short video fast mode) |
 | `V2G_FRAME_BUDGET` | `40` | Max keyframes to send to LLM (long video cap) |
 | `V2G_SCENE_THRESHOLD` | `0.3` | ffmpeg scene-detect sensitivity (0.0–1.0) |
-| `V2G_CHUNK_DURATION` | `600` | Seconds per analysis chunk (detail mode, long videos) |
+| `V2G_CHUNK_DURATION` | `60` | Seconds per analysis chunk (detail mode; must be ≤ `V2G_MAX_DURATION`) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB per chunk |
 
 ## Language & dialogue contract
