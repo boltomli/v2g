@@ -15,6 +15,7 @@ from pathlib import Path
 
 from v2g.config import settings
 from v2g.godot import templates as T
+from v2g.llm import jsonfix
 from v2g.llm.analyzer import GameDesign
 from v2g.llm.client import chat
 
@@ -112,7 +113,6 @@ def _repair_scripts(
     res = chat(
         T.LLM_SCRIPT_SYSTEM,
         [design.model_dump_json(indent=2), ask],
-        max_tokens=16384,
         temperature=0.3,
     )
     runlog.llm_dump("scripts_repair", res.text)
@@ -183,16 +183,6 @@ def _safe_name(title: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_").lower() or "game"
 
 
-def _strip_md_fences(text: str) -> str:
-    """Remove markdown code fences if present."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = "\n".join(cleaned.split("\n")[1:])
-    if cleaned.endswith("```"):
-        cleaned = "\n".join(cleaned.split("\n")[:-1])
-    return cleaned.strip()
-
-
 def _generate_scripts(design: GameDesign) -> dict[str, str]:
     """Ask the LLM to generate ALL GDScript scripts from the game design.
 
@@ -202,7 +192,7 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
     from v2g import cache, runlog
 
     design_json = design.model_dump_json(indent=2)
-    res = chat(T.LLM_SCRIPT_SYSTEM, [design_json], max_tokens=16384, temperature=0.3)
+    res = chat(T.LLM_SCRIPT_SYSTEM, [design_json], temperature=0.3)
     parsed = _try_load_scripts(res.text)
     if parsed is None and res.cached:
         # Only a cached answer gets one refill; a fresh malformed response
@@ -211,7 +201,7 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
         log.warning("Discarded invalid cached scripts response; refetching once")
         res = chat(
             T.LLM_SCRIPT_SYSTEM, [design_json],
-            max_tokens=16384, temperature=0.3, refresh=True,
+            temperature=0.3, refresh=True,
         )
         parsed = _try_load_scripts(res.text)
     dump = runlog.llm_dump("scripts", res.text)  # keep the raw response either way
@@ -240,16 +230,23 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
 
 
 def _try_load_scripts(text: str) -> dict | None:
-    """Parse the scripts JSON envelope; None = unusable (parse layer)."""
-    try:
-        data = json.loads(_strip_md_fences(text))
-    except json.JSONDecodeError as e:
-        log.debug("scripts JSON decode failed: %s", e)
-        return None
-    if not isinstance(data, dict):
-        log.warning("LLM returned non-dict for scripts: %s", type(data).__name__)
-        return None
-    return data
+    """Parse the scripts JSON envelope; None = unusable (parse layer).
+
+    On decode failure falls back to the shared truncation repair: a
+    max_tokens cut mid-envelope still yields every complete script before
+    the cut (the cut file itself is caught later by the compile check).
+    """
+    for cand in jsonfix.json_candidates(text):
+        try:
+            data = json.loads(cand)
+        except json.JSONDecodeError as e:
+            log.debug("scripts JSON decode failed: %s", e)
+            continue
+        if not isinstance(data, dict):
+            log.warning("LLM returned non-dict for scripts: %s", type(data).__name__)
+            return None
+        return data
+    return jsonfix.salvage(text)
 
 
 def _ensure_essentials(

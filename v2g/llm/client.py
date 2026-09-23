@@ -59,17 +59,21 @@ def chat(
     system: str,
     user_parts: list[str | Path],
     *,
-    max_tokens: int = 8192,
+    max_tokens: int | None = None,
     temperature: float = 0.4,
     refresh: bool = False,
 ) -> ChatResult:
     """Send a multimodal chat request, served from the response cache when possible.
 
     - str parts → text content; Path parts → image/video (auto-detected by extension)
+    - max_tokens omitted → settings.llm_max_tokens (callers with a fixed
+      budget — analysis modes — pass their own value)
     - refresh=True skips the cache read (used when a cached answer proved
       invalid) and overwrites the stored entry with the fresh answer.
     - Truncated output (finish=length) is never cached.
     """
+    if max_tokens is None:
+        max_tokens = settings.llm_max_tokens
     key = cache.key_for(
         model=settings.llm_model,
         system=system,

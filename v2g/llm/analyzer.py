@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 
 from v2g import cache, runlog
 from v2g.config import settings
+from v2g.llm import jsonfix
 from v2g.llm.client import chat
 from v2g.llm.errors import LLMOutputError
 from v2g.video.dialogue import TranscriptLine, format_transcript
@@ -343,108 +344,6 @@ class GameDesign(BaseModel):
         return self.scenes
 
 
-def _strip_fences(text: str) -> str:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = "\n".join(cleaned.split("\n")[1:])
-    if cleaned.endswith("```"):
-        cleaned = "\n".join(cleaned.split("\n")[:-1])
-    return cleaned.strip()
-
-
-def _json_candidates(raw: str) -> list[str]:
-    """Ordered candidate bodies: fence-stripped full text, then outermost {…}."""
-    cleaned = _strip_fences(raw)
-    out = [cleaned]
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if 0 <= start < end:
-        out.append(cleaned[start:end + 1])
-    return list(dict.fromkeys(out))
-
-
-def _close(s: str) -> str | None:
-    """Close an unterminated string and unbalanced brackets of *s*.
-
-    Returns None when brackets are mismatched (not worth salvaging).
-    """
-    stack: list[str] = []
-    in_str = False
-    esc = False
-    for ch in s:
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-        elif ch == '"':
-            in_str = True
-        elif ch == "{":
-            stack.append("}")
-        elif ch == "[":
-            stack.append("]")
-        elif ch in "}]" and (not stack or stack.pop() != ch):
-            return None
-    if in_str and esc:
-        s = s[:-1]  # dangling escape from truncation — drop it
-    return s + ('"' if in_str else "") + "".join(reversed(stack))
-
-
-def _closure_candidates(s: str) -> list[str]:
-    """Candidate repairs for truncated JSON, best (fullest) first.
-
-    1. Close the open string/brackets as-is (truncation landed on a complete
-       value or inside a string VALUE).
-    2. Cut back at each outside-string comma from the end (truncation landed
-       mid-key / mid-token) and close from there.
-    """
-    cands: list[str] = []
-    closed = _close(s)
-    if closed:
-        cands.append(closed)
-
-    commas: list[int] = []
-    in_str = False
-    esc = False
-    for i, ch in enumerate(s):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-        elif ch == '"':
-            in_str = True
-        elif ch == ",":
-            commas.append(i)
-
-    for i in reversed(commas[-500:]):
-        prefix = s[:i].rstrip()
-        if not prefix:
-            break
-        cand = _close(prefix)
-        if cand and cand not in cands:
-            cands.append(cand)
-    return cands
-
-
-def _salvage(raw: str) -> dict | None:
-    """Best-effort parse of truncated/malformed LLM JSON into a dict."""
-    import json as _json
-    for cand in _json_candidates(raw):
-        for attempt in _closure_candidates(cand):
-            try:
-                data = _json.loads(attempt)
-            except _json.JSONDecodeError:
-                continue
-            if isinstance(data, dict):
-                log.info("Repaired malformed LLM JSON (%d → %d chars)", len(cand), len(attempt))
-                return data
-    return None
-
-
 def _parse(raw: str) -> GameDesign:
     """Clean, repair and parse LLM output into GameDesign.
 
@@ -456,7 +355,7 @@ def _parse(raw: str) -> GameDesign:
     dump = runlog.llm_dump("analysis", raw)  # keep the raw response either way
     last_err: Exception | None = None
     data: dict | None = None
-    for cand in _json_candidates(raw):
+    for cand in jsonfix.json_candidates(raw):
         try:
             parsed = _json.loads(cand)
         except _json.JSONDecodeError as e:
@@ -467,7 +366,7 @@ def _parse(raw: str) -> GameDesign:
             break
         last_err = ValueError(f"top-level JSON value is {type(parsed).__name__}, not an object")
     if data is None:
-        data = _salvage(raw)
+        data = jsonfix.salvage(raw)
     if data is None:
         where = f" Raw response saved to {dump}." if dump else ""
         raise LLMOutputError(
@@ -619,7 +518,8 @@ def analyze(
     )
     parts: list[str | Path] = [_inject_instruct(user_msg, instruct)]
     parts.extend(frames)
-    return _request_design(_SYSTEM_FRAMES, parts)
+    # Fast-mode budget must stay aligned with analysis_key's max_tokens field.
+    return _request_design(_SYSTEM_FRAMES, parts, max_tokens=8192)
 
 
 def analyze_video(
