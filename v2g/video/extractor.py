@@ -9,7 +9,6 @@ The pipeline auto-selects based on video duration.
 """
 
 import logging
-import math
 import subprocess
 from pathlib import Path
 
@@ -255,22 +254,77 @@ def _run_scene_extract(video_path: Path, out_dir: Path, threshold: float) -> Non
 # ── Video segmentation (for long videos in detail mode) ──────────────────────
 
 
-def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) -> list[Path]:
-    """Split a video into segments of *segment_duration* seconds.
+def _probe_manifest(directory: Path) -> Path | None:
+    """``manifest.txt`` in *directory* naming artifacts that all exist and are non-empty."""
+    manifest = directory / "manifest.txt"
+    if not manifest.is_file():
+        return None
+    names = _read_manifest(manifest)
+    if not names or not all(
+        (directory / n).is_file() and (directory / n).stat().st_size > 0 for n in names
+    ):
+        return None
+    return manifest
 
-    Returns a list of segment file paths in order.
-    Used for detail-mode analysis of long videos that exceed LLM upload limits.
+
+def _read_manifest(manifest: Path) -> list[str]:
+    return [n for n in manifest.read_text(encoding="utf-8").splitlines() if n.strip()]
+
+
+def _fit_size(path: Path, cap_mb: float) -> list[Path]:
+    """Losslessly halve *path* by duration until every piece is ≤ *cap_mb*.
+
+    Only ``-c copy`` is used — bytes are divided, never re-encoded, and encode
+    parameters are never re-tuned. Relies on the compression pass beforehand:
+    ``-bf 0`` (dts==pts, so ``-t`` cuts exactly at the midpoint) and a keyframe
+    at every ⅛ of the segment (midpoints of the first two split levels always
+    land on one; ``-ss`` never starts a tail at the piece's own beginning).
+    *path* is deleted; leaf pieces come back in chronological order.
+
+    Raises RuntimeError when a midpoint cut fails to shrink either half, i.e.
+    splitting can no longer make progress.
+    """
+    if path.stat().st_size <= cap_mb * 1024 * 1024:
+        return [path]
+    dur = _get_duration(path)
+    half = dur / 2
+    children = [path.with_name(f"{path.stem}_{i}{path.suffix}") for i in range(2)]
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(path), "-t", f"{half:.3f}", "-c", "copy", str(children[0])],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-ss", f"{half:.3f}", "-i", str(path), "-c", "copy", str(children[1])],
+        capture_output=True,
+        check=True,
+    )
+    head_dur = _get_duration(children[0])
+    tail_dur = _get_duration(children[1])
+    if head_dur >= dur - 0.05 or tail_dur >= dur - 0.05:
+        raise RuntimeError(
+            f"{path.name}: midpoint {half:.2f}s made no progress "
+            f"({dur:.2f}s → head {head_dur:.2f}s, tail {tail_dur:.2f}s — no "
+            f"cuttable boundary); {path.stat().st_size / (1024 * 1024):.2f} MB "
+            f"still exceeds {cap_mb} MB"
+        )
+    path.unlink()
+    return _fit_size(children[0], cap_mb) + _fit_size(children[1], cap_mb)
+
+
+def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) -> list[Path]:
+    """Split a video into uploadable segments of *segment_duration* seconds.
+
+    Each segment is cut with ``-c copy``, compressed at most once when it
+    exceeds ``video_max_mb`` and — still over after that single pass — halved
+    losslessly by duration until every piece fits. Returns the leaf pieces in
+    order; a ``manifest.txt`` in the cache entry records them.
 
     Segments are cached across runs, keyed by source identity (size + mtime)
     and the split/compression settings — reruns skip the re-cut entirely.
     *tmp_dir* is only the fallback location when ``V2G_MEDIA_CACHE=0``.
     """
     duration = _get_duration(video_path)
-    if duration <= segment_duration:
-        return [video_path]
-
-    count = math.ceil(duration / segment_duration)
-    names = [f"segment_{i:03d}.mp4" for i in range(count)]
     stat = video_path.stat()
     entry = cache.media_entry(
         "split",
@@ -283,21 +337,19 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) ->
         fallback=tmp_dir,
     )
 
-    def probe(directory: Path) -> Path | None:
-        first = directory / names[0]
-        return first if all((directory / n).is_file() for n in names) else None
-
-    hit = cache.media_find(entry, probe)
+    hit = cache.media_find(entry, _probe_manifest)
     if hit is not None:
-        log.info("Segment cache hit: %d segments from %s", count, video_path.name)
+        names = _read_manifest(hit)
+        log.info("Segment cache hit: %d segments from %s", len(names), video_path.name)
         return [entry / n for n in names]
 
     with cache.media_stage(entry) as stage:
+        leaves: list[str] = []
         seg_idx = 0
         start = 0.0
 
         while start < duration:
-            seg_path = stage / names[seg_idx]
+            seg_path = stage / f"segment_{seg_idx:03d}.mp4"
             end = min(start + segment_duration, duration)
             subprocess.run(
                 [
@@ -311,9 +363,13 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) ->
                 capture_output=True,
                 check=True,
             )
-            # Compress segment if too large for upload
+            # Compress segment if too large for upload — at most once. ``-bf 0``
+            # keeps dts==pts (the lossless midpoint split below trims by dts)
+            # and a keyframe every eighth puts a cut on the midpoint of the
+            # first two split levels.
             size_mb = seg_path.stat().st_size / (1024 * 1024)
             if size_mb > settings.video_max_mb:
+                seg_len = end - start
                 compressed = stage / "compressed.mp4"
                 target_bitrate = int(settings.video_max_mb * 8 * 1024 / segment_duration)
                 subprocess.run(
@@ -323,6 +379,8 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) ->
                         "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
                         "-b:v", f"{target_bitrate}k",
                         "-b:a", "64k",
+                        "-bf", "0",
+                        "-force_key_frames", f"expr:gte(t,n_forced*{seg_len / 8:.3f})",
                         "-preset", "fast",
                         str(compressed),
                     ],
@@ -330,22 +388,29 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 600) ->
                     check=True,
                 )
                 compressed.replace(seg_path)
-
-            log.info("  Segment %d: %.0fs–%.0fs (%.1f MB)",
-                     seg_idx, start, end, seg_path.stat().st_size / (1024 * 1024))
+            pieces = _fit_size(seg_path, settings.video_max_mb)
+            leaves.extend(p.name for p in pieces)
+            log.info(
+                "  Segment %d: %.0fs–%.0fs → %d piece(s), %s",
+                seg_idx, start, end, len(pieces),
+                ", ".join(f"{p.name} {p.stat().st_size / (1024 * 1024):.1f} MB" for p in pieces),
+            )
             start = end
             seg_idx += 1
 
-    return [entry / n for n in names]
+        (stage / "manifest.txt").write_text("\n".join(leaves) + "\n", encoding="utf-8")
+
+    return [entry / n for n in leaves]
 
 
 # ── Video preparation for LLM upload ─────────────────────────────────────────
 
 
-def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) -> Path:
-    """Prepare video for LLM upload: trim to max_duration, compress if over max_mb.
+def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) -> list[Path]:
+    """Prepare video for LLM upload: trim to max_duration, compress at most once
+    if over *max_mb*, then losslessly halve by duration until every piece fits.
 
-    Returns path to the processed video file. The output is cached across runs,
+    Returns the pieces in order (usually one). The output is cached across runs,
     keyed by source identity (size + mtime) and the trim/compression settings —
     reruns skip the re-encode. *tmp_dir* is only the fallback location when
     ``V2G_MEDIA_CACHE=0``.
@@ -362,14 +427,11 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
         fallback=tmp_dir,
     )
 
-    def probe(directory: Path) -> Path | None:
-        upload = directory / "upload.mp4"
-        return upload if upload.is_file() and upload.stat().st_size > 0 else None
-
-    hit = cache.media_find(entry, probe)
+    hit = cache.media_find(entry, _probe_manifest)
     if hit is not None:
-        log.info("Prepared-video cache hit: %s", hit)
-        return hit
+        names = _read_manifest(hit)
+        log.info("Prepared-video cache hit: %d file(s)", len(names))
+        return [entry / n for n in names]
 
     with cache.media_stage(entry) as stage:
         duration = _get_duration(video_path)
@@ -383,9 +445,13 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
         trim_args += ["-c", "copy", str(upload)]
         subprocess.run(trim_args, capture_output=True, check=True)
 
-        # Step 2: compress if file is too large
+        # Step 2: compress once if the file is too large — never retried.
+        # ``-bf 0`` keeps dts==pts (the lossless split below trims by dts) and
+        # a keyframe every eighth of the clip covers the midpoints of the first
+        # two split levels, so any overshoot is split away instead of re-tuned.
         size_mb = upload.stat().st_size / (1024 * 1024)
         if size_mb > max_mb:
+            upload_dur = _get_duration(upload)
             compressed = stage / "compressed.mp4"
             target_bitrate = int(max_mb * 8 * 1024 / max_dur)  # kbps
             subprocess.run(
@@ -395,6 +461,8 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
                     "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
                     "-b:v", f"{target_bitrate}k",
                     "-b:a", "64k",
+                    "-bf", "0",
+                    "-force_key_frames", f"expr:gte(t,n_forced*{upload_dur / 8:.3f})",
                     "-preset", "fast",
                     str(compressed),
                 ],
@@ -403,7 +471,12 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
             )
             compressed.replace(upload)
 
-    return entry / "upload.mp4"
+        # Step 3: split away any overshoot — lossless halves, no re-encode
+        pieces = _fit_size(upload, max_mb)
+        names = [p.name for p in pieces]
+        (stage / "manifest.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+
+    return [entry / n for n in names]
 
 
 # ── Legacy convenience ───────────────────────────────────────────────────────

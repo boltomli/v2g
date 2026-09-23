@@ -68,7 +68,7 @@ def test_compression_produces_encoder_compatible_dimensions(tmp_path, monkeypatc
     monkeypatch.setattr(settings, "output_root", tmp_path / "out")
     source = _make_video(tmp_path / "portrait.mp4")
 
-    output = extractor.prepare_video_for_upload(source, tmp_path, max_mb=0.5)
+    outputs = extractor.prepare_video_for_upload(source, tmp_path, max_mb=0.5)
     probe = subprocess.run(
         [
             "ffprobe",
@@ -76,7 +76,7 @@ def test_compression_produces_encoder_compatible_dimensions(tmp_path, monkeypatc
             "-select_streams", "v:0",
             "-show_entries", "stream=width,height",
             "-of", "json",
-            str(output),
+            str(outputs[0]),
         ],
         check=True,
         capture_output=True,
@@ -156,8 +156,8 @@ def test_prepare_video_for_upload_caches_across_runs(tmp_path, monkeypatch):
     source = _make_video(tmp_path / "clip.mp4")
 
     first = extractor.prepare_video_for_upload(source, tmp_path / "run1", max_mb=0.5)
-    assert first.is_file()
-    assert first.parent.parent == tmp_path / "out" / ".v2g_cache" / "media"
+    assert first and all(p.is_file() for p in first)
+    assert first[0].parent.parent == tmp_path / "out" / ".v2g_cache" / "media"
 
     def no_subprocess(*args, **kwargs):
         pytest.fail("re-encoded on cache hit")
@@ -189,5 +189,40 @@ def test_split_video_caches_segments_across_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(extractor.subprocess, "run", guard)
     again = extractor.split_video(source, tmp_path / "run2", segment_duration=1)
     assert again == segments
+
+
+@_FFMPEG_REQUIRED
+def test_split_video_halves_oversize_segments_until_under_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "output_root", tmp_path / "out")
+    monkeypatch.setattr(settings, "video_max_mb", 0.05)
+    source = _make_video(tmp_path / "big.mp4", size="320x240", duration=4)
+
+    segments = extractor.split_video(source, tmp_path / "run", segment_duration=4)
+
+    # The single compression overshoots (audio is budgeted separately) — the
+    # segment must be losslessly halved: never re-compressed, never over cap.
+    assert len(segments) > 1
+    for p in segments:
+        assert p.stat().st_size <= 0.05 * 1024 * 1024
+        assert extractor._get_duration(p) <= 4.1  # time budget respected
+    total = sum(extractor._get_duration(p) for p in segments)
+    assert total == pytest.approx(4.0, abs=0.3)
+
+
+@_FFMPEG_REQUIRED
+def test_prepare_video_splits_when_compression_still_overshoots(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "output_root", tmp_path / "out")
+    monkeypatch.setattr(settings, "max_duration", 1)
+    source = _make_video(tmp_path / "clip.mp4", duration=2)
+
+    pieces = extractor.prepare_video_for_upload(source, tmp_path / "run", max_mb=0.03)
+
+    assert pieces  # list return — a single over-cap Path must not slip through
+    for p in pieces:
+        assert p.stat().st_size <= 0.03 * 1024 * 1024
+    total = sum(extractor._get_duration(p) for p in pieces)
+    # ≥ trimmed duration: no content lost; ≤ 2× absorbs copy-boundary overlap
+    # (each cut can duplicate up to one keyframe interval — 0.2s at 5 fps)
+    assert 0.9 <= total <= 2.0
 
 

@@ -62,9 +62,13 @@ Extracts keyframe images and sends them to the LLM.
 ### Detail mode (`--detail` / `-d`)
 Sends the full video file directly to a video-capable LLM.
 - Requires a model that supports `video_url` content type
-- Short video (≤10 min): single upload, trimmed/compressed to fit `V2G_VIDEO_MAX_MB`
+- Short video (≤10 min): single upload, trimmed, compressed at most once, then losslessly
+  split by duration until every file fits `V2G_VIDEO_MAX_MB` (the cap is hard — compression
+  output is verified, never assumed)
 - **Long video (>10 min): automatic chunked analysis** — splits into `V2G_CHUNK_DURATION`-second
-  segments (default 10 min each), analyzes each segment separately, then merges results.
+  segments (default 10 min each); each segment is compressed at most once, and any segment
+  still over `V2G_VIDEO_MAX_MB` is halved losslessly (stream copy, no re-encode) until it fits.
+  Analyzes each segment separately, then merges results.
   Characters are deduplicated (most detailed version kept), scenes concatenated, mechanics unioned.
 - Produces richer design: object behaviors, physics rules, spatial layouts, progression
 - Higher token cost, slower, but significantly more detailed output

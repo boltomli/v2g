@@ -13,7 +13,6 @@ from v2g.llm.analyzer import (
     GameDesign,
     analysis_key,
     analyze,
-    analyze_video,
     analyze_video_chunked,
     load_checkpoint,
     save_checkpoint,
@@ -74,17 +73,18 @@ def _analyze(
                 segments, instruct=instruct, transcript=transcript_lines
             )
         else:
-            # Short enough: single upload
+            # Short enough: one analysis; split further only if a piece still
+            # exceeds the size cap after its single compression pass.
             console.print("[bold cyan]▶ Preparing video for detailed analysis...[/]")
-            upload_path = prepare_video_for_upload(source_video, work, settings.video_max_mb)
-            size_mb = upload_path.stat().st_size / (1024 * 1024)
-            console.print(f"  Video ready ({size_mb:.1f} MB)")
+            uploads = prepare_video_for_upload(source_video, work, settings.video_max_mb)
+            total_mb = sum(p.stat().st_size for p in uploads) / (1024 * 1024)
+            console.print(
+                f"  Video ready ({len(uploads)} file(s), {total_mb:.1f} MB)"
+            )
 
             console.print("[bold cyan]▶ Analyzing video with LLM (detailed)...[/]")
-            design = analyze_video(
-                upload_path,
-                instruct=instruct,
-                transcript=format_transcript(transcript_lines) or None,
+            design = analyze_video_chunked(
+                uploads, instruct=instruct, transcript=transcript_lines
             )
     else:
         # ── Fast mode: extract keyframes ──────────────────────────────────

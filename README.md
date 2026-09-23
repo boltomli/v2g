@@ -100,7 +100,7 @@ All settings via environment variables (or `.env` file):
 | `V2G_GODOT_PATH` | `godot` | Godot executable |
 | `V2G_MAX_DURATION` | `120` | Max video seconds (detail mode) |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between extracted frames (fast mode) |
-| `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB (detail mode) |
+| `V2G_VIDEO_MAX_MB` | `20` | Hard cap on upload size in MB — oversized files are split to fit (detail mode) |
 
 ## Project Structure
 

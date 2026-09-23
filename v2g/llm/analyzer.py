@@ -15,6 +15,7 @@ from v2g.config import settings
 from v2g.llm.client import chat
 from v2g.llm.errors import LLMOutputError
 from v2g.video.dialogue import TranscriptLine, format_transcript
+from v2g.video.extractor import _get_duration
 
 # Import OpenAI exceptions for chunked analysis error handling
 try:
@@ -672,6 +673,15 @@ def analyze_video_chunked(
     log = logging.getLogger(__name__)
 
     designs: list[GameDesign] = []
+    # Segment lengths vary (trailing segment, size-driven splits) — anchor each
+    # transcript window to the segments' actual durations, not the chunk grid.
+    windows: list[tuple[float, float]] = []
+    if transcript:
+        cursor = 0.0
+        for seg in segments:
+            seg_dur = _get_duration(seg)
+            windows.append((cursor, cursor + seg_dur))
+            cursor += seg_dur
     for i, seg in enumerate(segments):
         label = f"[{i + 1}/{len(segments)}]"
         log.info("Analyzing segment %s", label)
@@ -679,8 +689,8 @@ def analyze_video_chunked(
         if transcript:
             seg_transcript = format_transcript(
                 transcript,
-                start=i * settings.chunk_duration,
-                end=(i + 1) * settings.chunk_duration,
+                start=windows[i][0],
+                end=windows[i][1],
             ) or None
         try:
             d = analyze_video(seg, instruct=instruct, transcript=seg_transcript)
