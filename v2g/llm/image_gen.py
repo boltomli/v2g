@@ -310,6 +310,7 @@ class QwenImage21Provider(ImageGenProvider):
     def _import_error() -> str | None:
         try:
             import torch  # noqa: F401
+            import torchvision  # noqa: F401 — Qwen3VL processor needs it
             import transformers  # noqa: F401
             from diffusers import QwenImage21Pipeline  # noqa: F401
         except Exception as e:  # noqa: BLE001 — any import-stage failure means "not ready"
@@ -369,27 +370,59 @@ class QwenImage21Provider(ImageGenProvider):
         if gguf.is_file():
             log.info("imagegen: loading Qwen-Image-2.1 (GGUF Q4 denoiser + bf16 text encoder)")
             text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
-                str(root), subfolder="text_encoder", torch_dtype=dtype, low_cpu_mem_usage=True
+                str(root), subfolder="text_encoder", dtype=dtype, low_cpu_mem_usage=True
             )
             transformer = QwenImage21Transformer2DModel.from_single_file(
                 str(gguf),
                 config=str(root),
                 subfolder="transformer",
                 quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
-                torch_dtype=dtype,
+                dtype=dtype,
             )
+            self._plain_non_linear_weights(transformer)
             pipe = QwenImage21Pipeline.from_pretrained(
-                str(root), text_encoder=text_encoder, transformer=transformer, torch_dtype=dtype
+                str(root), text_encoder=text_encoder, transformer=transformer, dtype=dtype
             )
         else:
             # Override root without the managed GGUF (full bf16 repo, remote id) —
             # let diffusers load the whole pipeline as-is.
             log.info("imagegen: loading Qwen-Image-2.1 from %s", root)
-            pipe = QwenImage21Pipeline.from_pretrained(str(root), torch_dtype=dtype)
-        self._pipe = self._place(pipe)
+            pipe = QwenImage21Pipeline.from_pretrained(str(root), dtype=dtype)
+        self._pipe = self._place(pipe, gguf=gguf.is_file())
 
     @staticmethod
-    def _place(pipe):
+    def _plain_non_linear_weights(transformer) -> None:
+        """Dequantize GGUF weights that modules read directly.
+
+        ``GGUFLinear`` dequantizes its own weight inside ``forward``; custom
+        modules such as ``QwenImage21ZeroCenterRMSNorm`` call ``weight.float()``
+        assuming a plain tensor — a BF16-in-GGUF weight arrives as raw bytes
+        (8192 of them for 4096 values) and the shapes collide.
+        ``modules_to_not_convert`` is still an unimplemented TODO in diffusers'
+        ``GGUFQuantizationConfig``, so plain the non-linear quants by hand.
+        """
+        import torch
+        from diffusers.quantizers.gguf.utils import (
+            GGUFLinear,
+            GGUFParameter,
+            dequantize_gguf_tensor,
+        )
+
+        linear_weight_ids = {
+            id(m.weight) for m in transformer.modules() if isinstance(m, GGUFLinear)
+        }
+        for module in transformer.modules():
+            weight = getattr(module, "weight", None)
+            if isinstance(weight, GGUFParameter) and id(weight) not in linear_weight_ids:
+                plain = dequantize_gguf_tensor(weight).to(torch.bfloat16)
+                module._parameters["weight"] = torch.nn.Parameter(plain, requires_grad=False)
+                log.debug(
+                    "imagegen: dequantized %s.weight %s -> %s",
+                    type(module).__name__, tuple(weight.shape), tuple(plain.shape),
+                )
+
+    @staticmethod
+    def _place(pipe, *, gguf: bool):
         """Pick the heaviest placement the GPU can honestly hold."""
         import torch
 
@@ -404,6 +437,14 @@ class QwenImage21Provider(ImageGenProvider):
             log.info("imagegen: %.0f GB VRAM — model CPU offload", vram_gb)
             pipe.enable_model_cpu_offload()
             return pipe
+        if gguf:
+            # accelerate's sequential offload round-trips every parameter through
+            # the meta device, and diffusers' GGUF tensor loses its quant_type
+            # there (KeyError: None). Excluding the component makes the same call
+            # place it with a plain `.to(device)` instead — the 4.2 GB quantized
+            # denoiser then stays resident on the GPU while only the bf16 text
+            # encoder and VAE hop module-at-a-time.
+            pipe._exclude_from_cpu_offload = ["transformer"]
         log.info("imagegen: %.0f GB VRAM — sequential CPU offload (module-at-a-time)", vram_gb)
         pipe.enable_sequential_cpu_offload()
         return pipe

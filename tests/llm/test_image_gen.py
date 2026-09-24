@@ -75,6 +75,92 @@ def test_target_size_caps_aspect_and_stays_on_grid():
         assert w % 32 == 0 and h % 32 == 0
 
 
+def test_plain_non_linear_weights_dequantizes_direct_read_quants():
+    """Norm-style weights leave the GGUF as plain tensors; linears stay quantized.
+
+    The imagegen extra carries diffusers — skip cleanly when it is not installed.
+    """
+    torch = pytest.importorskip("torch")
+    gguf_utils = pytest.importorskip("diffusers.quantizers.gguf.utils")
+
+    class _Norm(torch.nn.Module):
+        def __init__(self, weight):
+            super().__init__()
+            self._parameters["weight"] = weight
+
+    # BF16-in-GGUF: 4096 values stored as 8192 raw bytes (quant type 30).
+    raw = gguf_utils.GGUFParameter(torch.zeros(8192, dtype=torch.uint8), quant_type=30)
+    norm = _Norm(raw)
+    plain_id = gguf_utils.GGUFParameter(torch.zeros(4, dtype=torch.uint8), quant_type=30)
+    linear = gguf_utils.GGUFLinear(4, 4)
+    linear.weight = torch.nn.Parameter(plain_id, requires_grad=False)
+
+    holder = torch.nn.Module()
+    holder.norm = norm
+    holder.proj = linear
+
+    QwenImage21Provider._plain_non_linear_weights(holder)
+
+    fixed = holder.norm.weight
+    assert not isinstance(fixed, gguf_utils.GGUFParameter)
+    assert fixed.dtype == torch.bfloat16 and tuple(fixed.shape) == (4096,)
+    # The linear keeps its quantized weight — GGUFLinear dequantizes per forward.
+    assert isinstance(holder.proj.weight, gguf_utils.GGUFParameter)
+
+
+def test_place_strategy_depends_on_vram_and_gguf(monkeypatch):
+    """6 GB + GGUF keeps the denoiser resident; bigger cards offload heavier."""
+    import types
+
+    torch = pytest.importorskip("torch")
+
+    from v2g.llm.image_gen import QwenImage21Provider
+
+    class FakePipe:
+        def __init__(self):
+            self.actions: list = []
+
+        def to(self, device):
+            self.actions.append(("to", device))
+            return self
+
+        def enable_model_cpu_offload(self):
+            self.actions.append("model_offload")
+
+        def enable_sequential_cpu_offload(self):
+            self.actions.append("sequential_offload")
+
+    def with_vram(gb: int) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda i: types.SimpleNamespace(total_memory=int(gb * 2**30)),
+        )
+
+    with_vram(6)
+    pipe = FakePipe()
+    QwenImage21Provider._place(pipe, gguf=True)
+    # The GGUF tensor cannot survive meta-device offload — it must stay resident.
+    assert pipe._exclude_from_cpu_offload == ["transformer"]
+    assert pipe.actions == ["sequential_offload"]
+
+    pipe = FakePipe()
+    QwenImage21Provider._place(pipe, gguf=False)
+    assert getattr(pipe, "_exclude_from_cpu_offload", []) == []  # plain bf16: meta-safe
+    assert pipe.actions == ["sequential_offload"]
+
+    with_vram(24)
+    pipe = FakePipe()
+    QwenImage21Provider._place(pipe, gguf=True)
+    assert pipe.actions == ["model_offload"]
+
+    with_vram(32)
+    pipe = FakePipe()
+    QwenImage21Provider._place(pipe, gguf=True)
+    assert pipe.actions == [("to", "cuda")]
+
+
 def test_prepare_model_short_circuits_on_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "output_root", tmp_path)
     monkeypatch.setattr(settings, "imagegen_model", "")

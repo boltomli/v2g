@@ -25,6 +25,7 @@ v2g = "v2g.__main__:main"
 [project.optional-dependencies]
 imagegen = [
     "torch>=2.4",
+    "torchvision",  # Qwen3VL processor requires it (image/video transforms)
     "transformers>=5.17",
     "accelerate>=1.0",
     "gguf>=0.15",
@@ -42,6 +43,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
 
 [tool.ruff]
 target-version = "py311"
