@@ -19,6 +19,10 @@ log = logging.getLogger(__name__)
 
 _FMT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 
+# Console-visible non-problem updates: recovery outcomes, run milestones.
+NOTICE = 25
+logging.addLevelName(NOTICE, "NOTICE")
+
 _run_dir: Path | None = None
 _handlers: list[logging.Handler] = []
 
@@ -114,7 +118,7 @@ def _slug(source: str) -> str:
 
 
 def _configure_logging(directory: Path) -> None:
-    """Point root logging at <run>/v2g.log (file: everything; console: warnings+)."""
+    """Point root logging at <run>/v2g.log (file: everything; console: NOTICE+)."""
     root = logging.getLogger()
     for handler in _handlers:
         root.removeHandler(handler)
@@ -126,7 +130,7 @@ def _configure_logging(directory: Path) -> None:
     file_handler.setFormatter(logging.Formatter(_FMT))
 
     stream_handler = logging.StreamHandler(sys.stderr)
-    stream_handler.setLevel(logging.WARNING)
+    stream_handler.setLevel(NOTICE)
     stream_handler.setFormatter(logging.Formatter(_FMT))
 
     root.addHandler(file_handler)

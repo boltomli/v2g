@@ -75,3 +75,19 @@ def test_slug_from_url_and_path():
     assert runlog._slug("https://ex.com/watch?v=abc") == "watch"
     assert runlog._slug("https://ex.com/video.mp4") == "video"
     assert runlog._slug("C:/videos/My Clip.MP4") == "My_Clip"
+
+
+def test_console_shows_notice_but_not_info(tmp_path, monkeypatch, capsys):
+    """Console stream = NOTICE+: recovery/completion lines visible, progress stays in the file."""
+    monkeypatch.setattr(runlog.settings, "output_root", tmp_path)
+    runlog.start_run("movie.mp4")
+
+    logger = logging.getLogger("v2g.testprobe")
+    logger.info("info-line-file-only")
+    logger.log(runlog.NOTICE, "notice-line-console")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    err = capsys.readouterr().err
+    assert "notice-line-console" in err
+    assert "info-line-file-only" not in err

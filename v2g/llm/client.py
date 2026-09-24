@@ -70,7 +70,7 @@ def chat(
       budget — analysis modes — pass their own value)
     - refresh=True skips the cache read (used when a cached answer proved
       invalid) and overwrites the stored entry with the fresh answer.
-    - Truncated output (finish=length) is never cached.
+    - Unusable output (finish=length, content_filter) is never cached.
     """
     if max_tokens is None:
         max_tokens = settings.llm_max_tokens
@@ -116,6 +116,10 @@ def chat(
         log.warning(
             "chat output hit max_tokens=%d — response truncated; JSON may be incomplete",
             max_tokens,
+        )
+    elif choice.finish_reason == "content_filter":
+        log.warning(
+            "chat output content-filtered (finish=content_filter) — response unusable; not cached"
         )
     else:
         cache.put(key, text)

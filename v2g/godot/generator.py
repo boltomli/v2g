@@ -136,6 +136,8 @@ def _validate_scripts(
     """Compile-check every script, repair once, then fall back — no parse
     error ships. Keeps files on disk in sync with the returned dict.
     """
+    from v2g import runlog
+
     failures: dict[str, list[str]] = {}
     for fname in scripts:
         errs = _check_script(project_root, fname)
@@ -150,7 +152,7 @@ def _validate_scripts(
     repairable = {f: e for f, e in failures.items() if f != "vn_manager.gd"}
     if repairable:
         for fname, source in _repair_scripts(design, scripts, repairable).items():
-            log.info("LLM repair fixed %s", fname)
+            log.log(runlog.NOTICE, "LLM repair fixed %s", fname)
             (project_root / fname).write_text(source, encoding="utf-8")
             scripts[fname] = source
 

@@ -65,7 +65,9 @@ def test_check_script_accepts_valid_script(tmp_path):
     assert G._check_script(proj, "ok.gd") == []
 
 
-def test_validate_keeps_llm_repaired_script(tmp_path, monkeypatch):
+def test_validate_keeps_llm_repaired_script(tmp_path, monkeypatch, caplog):
+    from v2g import runlog
+
     proj = _project(tmp_path)
     broken = "extends CanvasLayer\n# _broken_\n"
     (proj / "alliance_map.gd").write_text(broken, encoding="utf-8")
@@ -75,10 +77,16 @@ def test_validate_keeps_llm_repaired_script(tmp_path, monkeypatch):
         lambda d, s, fail: {"alliance_map.gd": "extends CanvasLayer\n"},
     )
 
-    out = G._validate_scripts(proj, _design(), {"alliance_map.gd": broken})
+    with caplog.at_level(runlog.NOTICE, logger="v2g.godot.generator"):
+        out = G._validate_scripts(proj, _design(), {"alliance_map.gd": broken})
 
     assert out["alliance_map.gd"] == "extends CanvasLayer\n"
     assert (proj / "alliance_map.gd").read_text(encoding="utf-8") == "extends CanvasLayer\n"
+    # the repair outcome must be console-visible (NOTICE outranks the console gate)
+    assert any(
+        r.levelno == runlog.NOTICE and "alliance_map.gd" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_validate_falls_back_when_repair_fails(tmp_path, monkeypatch):

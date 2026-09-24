@@ -71,3 +71,17 @@ def test_truncated_response_is_never_cached(monkeypatch, tmp_path):
     assert first.text == "partial"
     assert counter["n"] == 2  # truncated answer was not stored
     assert second.text == "full"
+
+
+def test_content_filtered_response_is_never_cached(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "output_root", tmp_path)
+    counter = _install_client(
+        monkeypatch, iter([_resp("blocked", finish="content_filter"), _resp("clean")])
+    )
+
+    first = client.chat("sys", ["hi"])
+    second = client.chat("sys", ["hi"])
+
+    assert first.text == "blocked"
+    assert counter["n"] == 2  # content-filtered answer was not stored
+    assert second.text == "clean"
