@@ -50,6 +50,7 @@ Two analysis modes:
 ```bash
 git clone <repo> && cd v2g
 uv sync
+uv sync --extra imagegen   # optional: local image generation (Qwen-Image-2.1)
 cp .env.example .env   # fill in V2G_LLM_API_KEY
 ```
 
@@ -101,6 +102,10 @@ All settings via environment variables (or `.env` file):
 | `V2G_MAX_DURATION` | `120` | Max seconds per single analysis; longer detail-mode input is trimmed to this |
 | `V2G_FRAME_INTERVAL` | `2.0` | Seconds between extracted frames (fast mode) |
 | `V2G_VIDEO_MAX_MB` | `20` | Hard cap on upload size in MB — oversized files are split to fit (detail mode) |
+| `V2G_IMAGEGEN_PROVIDER` | — | Image generation: `qwen` = local Qwen-Image-2.1 (needs `--extra imagegen`); unset = off |
+| `V2G_IMAGEGEN_STYLE` | — | Style prefix prepended to all image-gen prompts |
+| `V2G_IMAGEGEN_STEPS` | `40` | Image-gen denoising steps |
+| `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
 
 ## Project Structure
 

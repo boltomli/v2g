@@ -28,11 +28,12 @@ class Settings(BaseSettings):
     scene_threshold: float = 0.3  # ffmpeg scene-detect sensitivity (0.0–1.0, lower = more frames)
     chunk_duration: int = 60  # seconds per analysis chunk (detail mode); must be ≤ max_duration
 
-    # Image generation (reserved for future use)
-    imagegen_api_key: str = ""
-    imagegen_base_url: str = "https://api.openai.com/v1"
-    imagegen_model: str = "dall-e-3"
+    # Image generation (local Qwen-Image-2.1 via the optional `imagegen` extra)
+    imagegen_provider: str = ""  # "" = off (assets stay raw frames) | "qwen" = local Qwen-Image-2.1
+    imagegen_model: str = ""  # model root override (diffusers dir / HF id); "" = managed GGUF bundle
     imagegen_style: str = ""  # global style prefix for all image gen prompts
+    imagegen_steps: int = 40  # denoising steps (Qwen's default)
+    imagegen_max_side: int = 1024  # longest output edge — lower to save RAM/VRAM
 
     # Output
     output_root: Path = Path("projects")

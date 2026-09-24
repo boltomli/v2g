@@ -20,9 +20,33 @@ dependencies = [
 [project.scripts]
 v2g = "v2g.__main__:main"
 
+# Local image generation (Qwen-Image-2.1 via diffusers) — opt in with
+# `uv sync --extra imagegen`; base installs stay light.
+[project.optional-dependencies]
+imagegen = [
+    "torch>=2.4",
+    "transformers>=5.17",
+    "accelerate>=1.0",
+    "gguf>=0.15",
+    "diffusers @ git+https://github.com/huggingface/diffusers",
+]
+
 [dependency-groups]
 dev = ["pytest", "ruff"]
+
+# CUDA builds of torch (PyPI ships CPU-only wheels on Windows).
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+# Flat layout at repo root also holds projects/ — pin discovery to the package.
+[tool.setuptools.packages.find]
+include = ["v2g*"]

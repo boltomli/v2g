@@ -24,7 +24,7 @@ Video (file / URL)
   │                                                      │
   │                              ┌────────────────────────┘
   │                              ▼
-  │                      [Image Gen API]  ← optional, future
+  │                      [Image Gen Provider] ← optional (V2G_IMAGEGEN_PROVIDER=qwen)
   │                       (style transfer)
   │                              │
   └──────────────────────────────┼───────────────────────────────┘
@@ -245,23 +245,47 @@ Spatial cropping uses the `spatial` field from `GameObject` analysis:
 - "right third" → crops to right 40%
 - No hint → full frame
 
-### Image generation (future)
+### Image generation (optional, local)
 
-An abstract `ImageGenProvider` interface is reserved for future image generation APIs:
-- **NullProvider** (default): no-op, assets come directly from video frames
-- **Future**: DALL-E, Stable Diffusion, or local APIs can transform extracted assets to match `--instruct` style
+With `-i/--instruct`, extracted assets can be re-drawn in that style by a
+**local Qwen-Image-2.1** model instead of shipping raw video frames:
 
-Configuration (env vars / `.env`):
+- **NullProvider** (default, `V2G_IMAGEGEN_PROVIDER` unset): no-op — assets are
+  the raw extracted frames, zero model involvement.
+- **QwenImage21Provider** (`V2G_IMAGEGEN_PROVIDER=qwen`): in-process diffusers
+  run of Qwen-Image-2.1 — one img2img restyle per asset; the design's `visual`
+  description is passed as `reference` so subjects keep their identity.
+
+Setup:
+
+1. `uv sync --extra imagegen` — pulls a CUDA torch build plus git diffusers;
+   base installs stay light (torch is ~2 GB).
+2. First use downloads a ~23 GB managed bundle into
+   `projects/.v2g_cache/imagegen/qwen-image-2.1/` — the official bf16 text
+   encoder + VAE (ModelScope mirror) plus the unsloth GGUF Q4_K_M denoiser
+   (the full bf16 stack is 33 GB and will not fit in RAM alongside the OS).
+   Pre-warm it ahead of a run with:
+   `.venv/Scripts/python -c "from v2g.llm.image_gen import prepare_model; prepare_model()"`
+3. Placement picks itself from VRAM (the bf16 text encoder alone is 17.5 GB):
+   ≥28 GB → fully on GPU, ≥20 GB → model CPU offload, else sequential
+   offload (one module at a time). On a 6 GB laptop GPU expect roughly
+   1–3 minutes per asset at the 1024 px / 40-step defaults.
+
+A failing asset keeps its original frame (logged) — image generation can
+never fail a run. `V2G_IMAGEGEN_MODEL` overrides the model root (e.g. the
+full bf16 repo on a big-GPU machine).
 
 | Variable | Default | Description |
 |---|---|---|
-| `V2G_IMAGEGEN_API_KEY` | — | API key for image generation service |
-| `V2G_IMAGEGEN_BASE_URL` | `https://api.openai.com/v1` | Image gen endpoint |
-| `V2G_IMAGEGEN_MODEL` | `dall-e-3` | Image gen model |
+| `V2G_IMAGEGEN_PROVIDER` | — | `qwen` = local Qwen-Image-2.1; unset = off |
+| `V2G_IMAGEGEN_MODEL` | — | Model root override (diffusers dir / HF id) |
 | `V2G_IMAGEGEN_STYLE` | — | Global style prefix prepended to all prompts |
+| `V2G_IMAGEGEN_STEPS` | `40` | Denoising steps |
+| `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge (aspect kept, dims ÷32) |
 
-To implement a new provider: subclass `ImageGenProvider` in `v2g/llm/image_gen.py`,
-implement `transform()` and `is_available()`, then update `get_provider()` factory.
+To implement a new provider: subclass `ImageGenProvider` in
+`v2g/llm/image_gen.py`, implement `transform()` and `is_available()`, then
+wire it into the `get_provider()` factory.
 
 ### Scene tree (main.tscn)
 

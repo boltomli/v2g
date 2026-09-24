@@ -185,6 +185,63 @@ def _safe_name(title: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_").lower() or "game"
 
 
+def _asset_reference(design: GameDesign, key: str) -> str:
+    """Design-side visual context for an extracted asset key.
+
+    Keys follow ``v2g.video.asset_extractor``: ``background``,
+    ``characters/<safe>``, ``objects/<safe>``, ``scenes/<safe>`` — the safe
+    name matches :func:`v2g.godot.templates._safe`.
+    """
+    kind, sep, name = key.partition("/")
+    if kind == "background" and design.scenes:
+        scene = design.scenes[0]
+        return f"{scene.name}: {scene.description}"
+    if not sep:
+        return ""
+    if kind == "characters":
+        return next(
+            (f"{c.name}, {c.visual}" for c in design.characters if T._safe(c.name) == name), ""
+        )
+    if kind == "objects":
+        return next(
+            (f"{o.name}, {o.visual}" for o in design.objects if T._safe(o.name) == name), ""
+        )
+    if kind == "scenes":
+        return next(
+            (f"{s.name}: {s.description}" for s in design.scenes if T._safe(s.name) == name), ""
+        )
+    return ""
+
+
+def _restyle_assets(
+    design: GameDesign,
+    assets: dict[str, Path],
+    instruct: str | None,
+) -> None:
+    """Re-draw each extracted asset in the --instruct style, in place.
+
+    Gated on *instruct*: without a style instruction the raw frames are the
+    correct output. One failing asset keeps its original frame — image
+    generation is an enhancement, never a reason for a run to fail.
+    """
+    if not instruct or not assets:
+        return
+    from v2g import runlog
+    from v2g.llm.image_gen import get_provider
+
+    provider = get_provider()
+    if not provider.is_available():
+        return
+    log.log(runlog.NOTICE, "Restyling %d asset(s) with imagegen", len(assets))
+    for key, path in list(assets.items()):
+        try:
+            assets[key] = provider.transform(
+                path, instruct, reference=_asset_reference(design, key)
+            )
+        except Exception as e:  # noqa: BLE001 — any failure keeps the run's original frame
+            log.warning("Image generation failed for %s — keeping original: %s", key, e)
+
+
 def _generate_scripts(design: GameDesign) -> dict[str, str]:
     """Ask the LLM to generate ALL GDScript scripts from the game design.
 
@@ -276,6 +333,8 @@ def generate(
     design: GameDesign,
     project_root: Path,
     video_path: Path | None = None,
+    *,
+    instruct: str | None = None,
 ) -> Path:
     """Create a full Godot project directory. Returns the project path.
 
@@ -285,6 +344,8 @@ def generate(
             created by ``runlog.start_run`` at pipeline start.
         video_path: Source video for asset extraction. If provided, frames are
             extracted as sprites/backgrounds and placed in assets/.
+        instruct: Optional style instruction — when set (and an image-gen
+            provider is configured), extracted assets are restyled first.
 
     Generated structure:
         <project>/
@@ -312,13 +373,8 @@ def generate(
         assets = extract_assets(video_path, design, assets_dir)
         log.info("Extracted %d asset(s)", len(assets))
 
-        # Optional: transform assets via image gen provider
-        from v2g.llm.image_gen import get_provider
-
-        provider = get_provider()
-        if provider.is_available() and assets:
-            # Future: apply style transformation when instruct is provided
-            pass
+        # Optional: restyle extracted assets with the local image-gen provider
+        _restyle_assets(design, assets, instruct)
 
     # 2. Generate ALL scripts via LLM
     log.info("Generating GDScript files via LLM...")

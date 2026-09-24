@@ -155,7 +155,7 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
 
     # ── Generate Godot project (into the run directory) ──────────────────────
     console.print("[bold cyan]▶ Generating Godot project...[/]")
-    project_path = generate(design, run_dir, video_path=source_video)
+    project_path = generate(design, run_dir, video_path=source_video, instruct=instruct)
     console.print(f"  [bold green]✓[/] Project created at [link=file://{project_path}]{project_path}[/link]")
     log.log(runlog.NOTICE, "Project created at %s", project_path)
 
