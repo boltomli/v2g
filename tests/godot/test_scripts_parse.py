@@ -24,10 +24,7 @@ def test_markdown_fenced_json_parses():
 
 def test_truncated_mid_value_keeps_complete_scripts():
     """Regression: a max_tokens cut mid-source must not lose finished files."""
-    raw = (
-        '{"gm.gd": "extends Node\\nscore := 1", '
-        '"hud.gd": "extends Control\\nfunc _ready() -> voi'
-    )
+    raw = '{"gm.gd": "extends Node\\nscore := 1", "hud.gd": "extends Control\\nfunc _ready() -> voi'
     out = _try_load_scripts(raw)
     assert out is not None
     assert out["gm.gd"] == "extends Node\nscore := 1"

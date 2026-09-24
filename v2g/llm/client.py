@@ -108,9 +108,12 @@ def chat(
     usage = resp.usage
     log.info(
         "chat: finish=%s chars=%d prompt_tokens=%s completion_tokens=%s max_tokens=%d key=%.12s",
-        choice.finish_reason, len(text),
-        getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None),
-        max_tokens, key,
+        choice.finish_reason,
+        len(text),
+        getattr(usage, "prompt_tokens", None),
+        getattr(usage, "completion_tokens", None),
+        max_tokens,
+        key,
     )
     if choice.finish_reason == "length":
         log.warning(

@@ -26,7 +26,7 @@ def json_candidates(raw: str) -> list[str]:
     out = [cleaned]
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if 0 <= start < end:
-        out.append(cleaned[start:end + 1])
+        out.append(cleaned[start : end + 1])
     return list(dict.fromkeys(out))
 
 

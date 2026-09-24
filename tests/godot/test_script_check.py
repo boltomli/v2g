@@ -21,8 +21,14 @@ _BROKEN = "SCRIPT ERROR: Parse Error: _broken_"
 
 def _design() -> GameDesign:
     return GameDesign(
-        title="T", genre="vn", summary="s", mechanics=[], controls=[],
-        style="st", objects=[], scenes=[],
+        title="T",
+        genre="vn",
+        summary="s",
+        mechanics=[],
+        controls=[],
+        style="st",
+        objects=[],
+        scenes=[],
     )
 
 
@@ -73,7 +79,8 @@ def test_validate_keeps_llm_repaired_script(tmp_path, monkeypatch, caplog):
     (proj / "alliance_map.gd").write_text(broken, encoding="utf-8")
     monkeypatch.setattr(G, "_check_script", _fake_check)
     monkeypatch.setattr(
-        G, "_repair_scripts",
+        G,
+        "_repair_scripts",
         lambda d, s, fail: {"alliance_map.gd": "extends CanvasLayer\n"},
     )
 
@@ -84,8 +91,7 @@ def test_validate_keeps_llm_repaired_script(tmp_path, monkeypatch, caplog):
     assert (proj / "alliance_map.gd").read_text(encoding="utf-8") == "extends CanvasLayer\n"
     # the repair outcome must be console-visible (NOTICE outranks the console gate)
     assert any(
-        r.levelno == runlog.NOTICE and "alliance_map.gd" in r.getMessage()
-        for r in caplog.records
+        r.levelno == runlog.NOTICE and "alliance_map.gd" in r.getMessage() for r in caplog.records
     )
 
 

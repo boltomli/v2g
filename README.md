@@ -107,6 +107,26 @@ All settings via environment variables (or `.env` file):
 | `V2G_IMAGEGEN_STEPS` | `40` | Image-gen denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
 
+## Development
+
+Lint/format is `ruff` (line length 100, target py311) and the repo is kept
+ruff-clean:
+
+```bash
+uv run ruff check .          # lint
+uv run ruff format .         # format (also formats ```python blocks in AGENT.md)
+uv run pytest                # tests
+```
+
+Git hooks run through [prek](https://github.com/brodul/prek) (a pre-commit
+drop-in) — `.pre-commit-config.yaml` pins `ruff-check --fix` + `ruff-format`
+to ruff v0.16.8:
+
+```bash
+prek install                 # wire the pre-commit hook (once per clone)
+prek run --all-files         # run every hook over the tree
+```
+
 ## Project Structure
 
 ```

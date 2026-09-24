@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     godot_path: str = "godot"
 
     # Video extraction
-    max_duration: int = 120  # seconds — cap for a single analysis; detail-mode input beyond this is trimmed
+    max_duration: int = (
+        120  # seconds — cap for a single analysis; detail-mode input beyond this is trimmed
+    )
     frame_interval: float = 2.0  # seconds between extracted frames (short videos)
     video_max_mb: int = 20  # max video size (MB) for direct upload to LLM
     frame_budget: int = 40  # max keyframes to send to LLM (long video cap)
@@ -30,7 +32,9 @@ class Settings(BaseSettings):
 
     # Image generation (local Qwen-Image-2.1 via the optional `imagegen` extra)
     imagegen_provider: str = ""  # "" = off (assets stay raw frames) | "qwen" = local Qwen-Image-2.1
-    imagegen_model: str = ""  # model root override (diffusers dir / HF id); "" = managed GGUF bundle
+    imagegen_model: str = (
+        ""  # model root override (diffusers dir / HF id); "" = managed GGUF bundle
+    )
     imagegen_style: str = ""  # global style prefix for all image gen prompts
     imagegen_steps: int = 40  # denoising steps (Qwen's default)
     imagegen_max_side: int = 1024  # longest output edge — lower to save RAM/VRAM

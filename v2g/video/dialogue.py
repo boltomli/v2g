@@ -75,7 +75,9 @@ def _ffmpeg_to_srt(src: Path) -> str | None:
     try:
         result = subprocess.run(
             ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-c:s", "srt", str(dst)],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode != 0 or not dst.is_file():
             return None
@@ -93,9 +95,22 @@ def _embedded_subtitles(video_path: Path) -> str | None:
     dst = Path(dst_name)
     try:
         result = subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(video_path),
-             "-map", "0:s:0", "-c:s", "srt", str(dst)],
-            capture_output=True, text=True, check=False,
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(video_path),
+                "-map",
+                "0:s:0",
+                "-c:s",
+                "srt",
+                str(dst),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode != 0 or not dst.is_file():
             return None

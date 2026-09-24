@@ -134,71 +134,78 @@ The LLM returns a JSON document validated into `GameDesign`:
 
 ```python
 class GameDesign:
-    title: str                      # Game title
-    genre: str                      # platformer, puzzle, action, adventure, RPG, etc.
-    summary: str                    # 2-3 sentence pitch
-    narrative: str                  # Full story arc with character motivations
-    mechanics: list[str]            # Core gameplay mechanics
-    controls: list[str]             # Control scheme descriptions
-    style: str                      # Art/visual style
-    physics: str                    # Physics rules (gravity, momentum, collisions)
-    progression: str                # Difficulty scaling, area unlocking
-    atmosphere: str                 # Mood, tone, sound design cues
-    characters: list[Character]     # All characters with full detail
-    objects: list[GameObject]       # All game objects
-    scenes: list[SceneDesign]       # Scene-by-scene breakdown
+    title: str  # Game title
+    genre: str  # platformer, puzzle, action, adventure, RPG, etc.
+    summary: str  # 2-3 sentence pitch
+    narrative: str  # Full story arc with character motivations
+    mechanics: list[str]  # Core gameplay mechanics
+    controls: list[str]  # Control scheme descriptions
+    style: str  # Art/visual style
+    physics: str  # Physics rules (gravity, momentum, collisions)
+    progression: str  # Difficulty scaling, area unlocking
+    atmosphere: str  # Mood, tone, sound design cues
+    characters: list[Character]  # All characters with full detail
+    objects: list[GameObject]  # All game objects
+    scenes: list[SceneDesign]  # Scene-by-scene breakdown
     scene_transitions: list[Transition]  # How scenes connect
-    dialogue_samples: list[Dialogue]     # Representative dialogue lines
+    dialogue_samples: list[Dialogue]  # Representative dialogue lines
+
 
 class Character:
     name: str
-    face_id: str                  # stable identity anchor (e.g. "char_01"), survives costume changes
-    role: str                     # protagonist / antagonist / NPC / companion / boss / minion
-    visual: str                   # PRIMARY appearance: face, body, hair, build (never changes)
-    personality: str              # temperament, speech patterns, motivations
-    behavior: str                 # AI behavior: patrol, attack, dialogue triggers
-    abilities: list[str]          # special abilities, attacks
-    relationships: str            # relations to other characters
-    personas: list[Persona]       # alternate costumes/outfits of the same person
+    face_id: str  # stable identity anchor (e.g. "char_01"), survives costume changes
+    role: str  # protagonist / antagonist / NPC / companion / boss / minion
+    visual: str  # PRIMARY appearance: face, body, hair, build (never changes)
+    personality: str  # temperament, speech patterns, motivations
+    behavior: str  # AI behavior: patrol, attack, dialogue triggers
+    abilities: list[str]  # special abilities, attacks
+    relationships: str  # relations to other characters
+    personas: list[Persona]  # alternate costumes/outfits of the same person
+
 
 class Persona:
-    outfit: str                   # costume name (e.g. "armored battle gear", "casual clothes")
-    visual: str                   # full appearance in this outfit (face consistent, clothes change)
-    context: str                  # when/where this look appears (e.g. "act 1", "final battle")
+    outfit: str  # costume name (e.g. "armored battle gear", "casual clothes")
+    visual: str  # full appearance in this outfit (face consistent, clothes change)
+    context: str  # when/where this look appears (e.g. "act 1", "final battle")
+
 
 class GameObject:
     name: str
-    role: str                     # player / enemy / obstacle / collectible / environment / trigger / UI
-    visual: str                   # Detailed visual description
-    behavior: str                 # Movement, interaction, state changes
-    spatial: str                  # Position relative to other elements
+    role: str  # player / enemy / obstacle / collectible / environment / trigger / UI
+    visual: str  # Detailed visual description
+    behavior: str  # Movement, interaction, state changes
+    spatial: str  # Position relative to other elements
+
 
 class SceneDesign:
     name: str
-    description: str              # What happens in this scene
-    layout: str                   # Spatial layout: ground, platforms, walls, exits
-    goals: list[str]              # Player objectives
-    hazards: list[str]            # Dangers, enemies, traps
-    triggers: list[str]           # Events that activate
-    visual_theme: str             # Scene-specific colors, lighting
+    description: str  # What happens in this scene
+    layout: str  # Spatial layout: ground, platforms, walls, exits
+    goals: list[str]  # Player objectives
+    hazards: list[str]  # Dangers, enemies, traps
+    triggers: list[str]  # Events that activate
+    visual_theme: str  # Scene-specific colors, lighting
+
 
 class Transition:
-    source: str                   # Source scene name
-    destination: str              # Destination scene name
-    trigger: str                  # What causes the transition
-    effect: str                   # Visual transition effect
+    source: str  # Source scene name
+    destination: str  # Destination scene name
+    trigger: str  # What causes the transition
+    effect: str  # Visual transition effect
+
 
 class Dialogue:
-    speaker: str                  # empty for narration entries
-    line: str                     # VERBATIM source line from the transcript; empty = narration
-    line_zh: str                  # REQUIRED Simplified Chinese: translation / original narration
-    context: str                  # When/why this line is said
-    choices: list[DialogueChoice] # player options: {line, line_zh, score}
+    speaker: str  # empty for narration entries
+    line: str  # VERBATIM source line from the transcript; empty = narration
+    line_zh: str  # REQUIRED Simplified Chinese: translation / original narration
+    context: str  # When/why this line is said
+    choices: list[DialogueChoice]  # player options: {line, line_zh, score}
+
 
 class DialogueChoice:
-    line: str = ""                # source-language text ONLY if verbatim in transcript
-    line_zh: str                  # Simplified Chinese option text
-    score: int = 1                # reputation/alliance points on selection
+    line: str = ""  # source-language text ONLY if verbatim in transcript
+    line_zh: str  # Simplified Chinese option text
+    score: int = 1  # reputation/alliance points on selection
 ```
 
 ## Generated Godot Project

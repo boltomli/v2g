@@ -77,10 +77,9 @@ def test_media_stage_commits_only_on_success(tmp_path):
     assert not (tmp_path / "entry.staging").exists()
 
     failing = tmp_path / "failing"
-    with pytest.raises(RuntimeError, match="build failed"):
-        with cache.media_stage(failing) as stage:
-            (stage / "artifact.bin").write_bytes(b"half")
-            raise RuntimeError("build failed")
+    with pytest.raises(RuntimeError, match="build failed"), cache.media_stage(failing) as stage:
+        (stage / "artifact.bin").write_bytes(b"half")
+        raise RuntimeError("build failed")
     assert not failing.exists()
     assert not (tmp_path / "failing.staging").exists()
 

@@ -6,8 +6,13 @@ from v2g.video.dialogue import TranscriptLine
 
 def _empty_design(title: str) -> analyzer.GameDesign:
     return analyzer.GameDesign(
-        title=title, genre="x", summary="s",
-        mechanics=[], controls=[], style="", objects=[],
+        title=title,
+        genre="x",
+        summary="s",
+        mechanics=[],
+        controls=[],
+        style="",
+        objects=[],
     )
 
 
@@ -15,9 +20,7 @@ def test_windows_follow_actual_segment_durations_not_chunk_grid(monkeypatch, tmp
     """Windows anchor to cumulative segment durations — size-driven splits and
     the trailing segment never land on the ``chunk_duration`` grid."""
     segs = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
-    monkeypatch.setattr(
-        analyzer, "_get_duration", lambda p: 10.0 if p.name == "a.mp4" else 5.0
-    )
+    monkeypatch.setattr(analyzer, "_get_duration", lambda p: 10.0 if p.name == "a.mp4" else 5.0)
 
     seen: list[tuple[str, str | None]] = []
 

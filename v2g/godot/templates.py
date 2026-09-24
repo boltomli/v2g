@@ -67,9 +67,7 @@ renderer/rendering_method="gl_compatibility"
 """
 
 
-def viewport_for(
-    video_size: tuple[int, int] | None, long_side: int = 1280
-) -> tuple[int, int]:
+def viewport_for(video_size: tuple[int, int] | None, long_side: int = 1280) -> tuple[int, int]:
     """Window size matching the source video's aspect ratio (long side fixed).
 
     Unknown/invalid size falls back to the 1280x720 default. The short side is
@@ -502,9 +500,7 @@ def main_scene(
     for fname in ("vn_manager.gd", "game_manager.gd"):
         if scripts and fname in scripts:
             eid = f"{len(ext_resources) + 1}_{_uid()}"
-            ext_resources.append(
-                f'[ext_resource type="Script" path="res://{fname}" id="{eid}"]'
-            )
+            ext_resources.append(f'[ext_resource type="Script" path="res://{fname}" id="{eid}"]')
             script_id_map[fname] = eid
 
     load_steps = len(ext_resources) + 1

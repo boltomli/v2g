@@ -33,16 +33,18 @@ def _print_design(design: GameDesign, instruct: str | None = None) -> None:
         # Show first 200 chars of narrative
         n = design.narrative
         narrative_brief = f"\nNarrative: {n[:200]}{'…' if len(n) > 200 else ''}"
-    console.print(Panel(
-        f"[bold]{design.title}[/]\n"
-        f"Genre: {design.genre}\n"
-        f"Mechanics: {', '.join(design.mechanics)}\n"
-        f"Objects: {len(design.objects)}  |  Characters: {len(design.characters)}  |  Scenes: {len(design.scenes)}"
-        f"{physics}{progression}{instruct_note}{narrative_brief}\n\n"
-        f"{design.summary}",
-        title="🎮 Game Design",
-        border_style="green",
-    ))
+    console.print(
+        Panel(
+            f"[bold]{design.title}[/]\n"
+            f"Genre: {design.genre}\n"
+            f"Mechanics: {', '.join(design.mechanics)}\n"
+            f"Objects: {len(design.objects)}  |  Characters: {len(design.characters)}  |  Scenes: {len(design.scenes)}"
+            f"{physics}{progression}{instruct_note}{narrative_brief}\n\n"
+            f"{design.summary}",
+            title="🎮 Game Design",
+            border_style="green",
+        )
+    )
 
 
 def _analyze(
@@ -64,28 +66,24 @@ def _analyze(
         if duration > chunk_dur + 30:
             # Long video: split into chunks and analyze each separately
             n_segments = int(duration / chunk_dur) + 1
-            console.print(f"[bold cyan]▶ Long video ({duration:.0f}s) — splitting into ~{n_segments} segments...[/]")
+            console.print(
+                f"[bold cyan]▶ Long video ({duration:.0f}s) — splitting into ~{n_segments} segments...[/]"
+            )
             segments = split_video(source_video, work, segment_duration=chunk_dur)
             console.print(f"  Split into {len(segments)} segments")
 
             console.print("[bold cyan]▶ Analyzing video segments with LLM (detailed)...[/]")
-            design = analyze_video_chunked(
-                segments, instruct=instruct, transcript=transcript_lines
-            )
+            design = analyze_video_chunked(segments, instruct=instruct, transcript=transcript_lines)
         else:
             # Short enough: one analysis; split further only if a piece still
             # exceeds the size cap after its single compression pass.
             console.print("[bold cyan]▶ Preparing video for detailed analysis...[/]")
             uploads = prepare_video_for_upload(source_video, work, settings.video_max_mb)
             total_mb = sum(p.stat().st_size for p in uploads) / (1024 * 1024)
-            console.print(
-                f"  Video ready ({len(uploads)} file(s), {total_mb:.1f} MB)"
-            )
+            console.print(f"  Video ready ({len(uploads)} file(s), {total_mb:.1f} MB)")
 
             console.print("[bold cyan]▶ Analyzing video with LLM (detailed)...[/]")
-            design = analyze_video_chunked(
-                uploads, instruct=instruct, transcript=transcript_lines
-            )
+            design = analyze_video_chunked(uploads, instruct=instruct, transcript=transcript_lines)
     else:
         # ── Fast mode: extract keyframes ──────────────────────────────────
         console.print("[bold cyan]▶ Extracting frames...[/]")
@@ -101,7 +99,13 @@ def _analyze(
     return design
 
 
-def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, instruct: str | None = None) -> Path:
+def run(
+    source: str,
+    output_dir: Path | None = None,
+    *,
+    detailed: bool = False,
+    instruct: str | None = None,
+) -> Path:
     """Execute the full pipeline and return the generated project path.
 
     Args:
@@ -125,16 +129,16 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
     # ── Source-language dialogue: subtitles are the only authoritative source ──
     transcript_lines: list[TranscriptLine] = extract_dialogue(source_video)
     if transcript_lines:
-        console.print(f"[bold cyan]▶ Transcript:[/] {len(transcript_lines)} subtitle lines from source video")
+        console.print(
+            f"[bold cyan]▶ Transcript:[/] {len(transcript_lines)} subtitle lines from source video"
+        )
         log.info("Transcript: %d subtitle lines", len(transcript_lines))
     else:
         console.print("[yellow]▶ No subtitles found — source-language lines will be left empty[/]")
         log.info("Transcript: none found — source-language lines will be left empty")
 
     # ── Analyze layer: checkpoint first, LLM only on a miss ─────────────────
-    key = analysis_key(
-        source_video, transcript_lines, detailed=detailed, instruct=instruct
-    )
+    key = analysis_key(source_video, transcript_lines, detailed=detailed, instruct=instruct)
     design = load_checkpoint(run_dir, key)
     if design is not None:
         console.print("[bold cyan]▶ Analysis checkpoint:[/] design.json reused, LLM skipped")
@@ -149,14 +153,20 @@ def run(source: str, output_dir: Path | None = None, *, detailed: bool = False, 
     _print_design(design, instruct)
     log.info(
         "Design analyzed: title=%r genre=%r characters=%d objects=%d scenes=%d dialogue=%d",
-        design.title, design.genre, len(design.characters), len(design.objects),
-        len(design.scenes), len(design.dialogue_samples),
+        design.title,
+        design.genre,
+        len(design.characters),
+        len(design.objects),
+        len(design.scenes),
+        len(design.dialogue_samples),
     )
 
     # ── Generate Godot project (into the run directory) ──────────────────────
     console.print("[bold cyan]▶ Generating Godot project...[/]")
     project_path = generate(design, run_dir, video_path=source_video, instruct=instruct)
-    console.print(f"  [bold green]✓[/] Project created at [link=file://{project_path}]{project_path}[/link]")
+    console.print(
+        f"  [bold green]✓[/] Project created at [link=file://{project_path}]{project_path}[/link]"
+    )
     log.log(runlog.NOTICE, "Project created at %s", project_path)
 
     return project_path

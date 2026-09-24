@@ -130,8 +130,7 @@ _OFFICIAL_FILES = (
     "vae/diffusion_pytorch_model.safetensors",
 )
 _GGUF_URL = (
-    "https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF/resolve/main/"
-    "qwen-image-2.1-Q4_K_M.gguf"
+    "https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF/resolve/main/qwen-image-2.1-Q4_K_M.gguf"
 )
 _GGUF_NAME = "qwen-image-2.1-Q4_K_M.gguf"
 _MARKER = ".v2g_complete"
@@ -171,10 +170,13 @@ def prepare_model() -> Path:
 
 # ── Downloader (stdlib, ranged-parallel, resumable) ─────────────────────────
 
+
 def _content_length(url: str) -> int | None:
     """Total size in bytes, or None when the server does not say."""
     try:
-        with urlopen(Request(url, method="HEAD", headers={"User-Agent": "v2g/1.0"}), timeout=30) as resp:
+        with urlopen(
+            Request(url, method="HEAD", headers={"User-Agent": "v2g/1.0"}), timeout=30
+        ) as resp:
             cl = resp.headers.get("Content-Length")
             if cl and cl.isdigit():
                 return int(cl)
@@ -229,7 +231,10 @@ def _fetch(url: str, dst: Path, *, streams: int = 6) -> None:
     ]
     log.info(
         "imagegen: %s (%.2f GB) — %d/%d chunks to fetch",
-        dst.name, total / 1e9, len(todo), len(ranges),
+        dst.name,
+        total / 1e9,
+        len(todo),
+        len(ranges),
     )
     with ThreadPoolExecutor(max_workers=streams) as pool:
         list(pool.map(lambda t: _fetch_part(url, parts / f"{t[0]}.part", t[1], t[2]), todo))
@@ -291,8 +296,10 @@ def _fetch_stream(url: str, dst: Path) -> None:
     tmp = dst.parent / f"{dst.name}.part"
     complete = False
     try:
-        with urlopen(Request(url, headers={"User-Agent": "v2g/1.0"}), timeout=60) as resp, \
-                open(tmp, "wb") as out:
+        with (
+            urlopen(Request(url, headers={"User-Agent": "v2g/1.0"}), timeout=60) as resp,
+            open(tmp, "wb") as out,
+        ):
             shutil.copyfileobj(resp, out, 1 << 20)
         complete = True
     finally:
@@ -423,7 +430,9 @@ class QwenImage21Provider(ImageGenProvider):
                 module._parameters["weight"] = torch.nn.Parameter(plain, requires_grad=False)
                 log.debug(
                     "imagegen: dequantized %s.weight %s -> %s",
-                    type(module).__name__, tuple(weight.shape), tuple(plain.shape),
+                    type(module).__name__,
+                    tuple(weight.shape),
+                    tuple(plain.shape),
                 )
 
     @staticmethod

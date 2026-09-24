@@ -22,8 +22,10 @@ from v2g.video.extractor import _get_duration
 try:
     from openai import APIError as _OpenAIError
 except ImportError:
+
     class _OpenAIError(Exception):
         pass
+
 
 log = logging.getLogger(__name__)
 
@@ -243,8 +245,10 @@ Return ONLY the JSON, no markdown fences, no commentary.
 
 # ── Pydantic models ────────────────────────────────────────────────────────
 
+
 class Persona(BaseModel):
     """A costume/outfit variant of a character. Same person, different look."""
+
     outfit: str = ""
     visual: str = ""
     context: str = ""  # when/where this look appears
@@ -253,13 +257,13 @@ class Persona(BaseModel):
 class Character(BaseModel):
     name: str
     role: str
-    visual: str                     # primary appearance (default outfit)
+    visual: str  # primary appearance (default outfit)
     personality: str = ""
     behavior: str = ""
     abilities: list[str] = []
     relationships: str = ""
-    personas: list[Persona] = []    # alternate costumes/outfits
-    face_id: str = ""               # identity anchor for cross-segment dedup
+    personas: list[Persona] = []  # alternate costumes/outfits
+    face_id: str = ""  # identity anchor for cross-segment dedup
 
 
 class GameObject(BaseModel):
@@ -281,7 +285,7 @@ class SceneDesign(BaseModel):
 
 
 class SceneTransition(BaseModel):
-    source: str = ""   # "from" is a reserved word in some contexts
+    source: str = ""  # "from" is a reserved word in some contexts
     destination: str = ""  # "to"
     trigger: str = ""
     effect: str = ""
@@ -292,6 +296,7 @@ class SceneTransition(BaseModel):
     def model_validate_json(cls, json_data, **kwargs):
         """Handle from/to field mapping."""
         import json as _json
+
         if isinstance(json_data, (str, bytes)):
             data = _json.loads(json_data)
         else:
@@ -306,6 +311,7 @@ class SceneTransition(BaseModel):
 
 class DialogueChoice(BaseModel):
     """One player-facing choice option. `line` only if verbatim from source."""
+
     line: str = ""
     line_zh: str = ""
     score: int = 1
@@ -313,9 +319,10 @@ class DialogueChoice(BaseModel):
 
 class DialogueSample(BaseModel):
     """One story-script entry. Empty `line` = narration (Chinese-only)."""
+
     speaker: str = ""
-    line: str = ""       # source language, VERBATIM from video transcript only
-    line_zh: str = ""    # Simplified Chinese: translation / original narration
+    line: str = ""  # source language, VERBATIM from video transcript only
+    line_zh: str = ""  # Simplified Chinese: translation / original narration
     context: str = ""
     choices: list[DialogueChoice] = []
 
@@ -352,6 +359,7 @@ def _parse(raw: str) -> GameDesign:
     to <run>/llm/ and LLMOutputError says where to look.
     """
     import json as _json
+
     dump = runlog.llm_dump("analysis", raw)  # keep the raw response either way
     last_err: Exception | None = None
     data: dict | None = None
@@ -407,9 +415,7 @@ def _request_design(system: str, parts: list[str | Path], **chat_kw) -> GameDesi
         if not res.cached:
             raise
         cache.invalidate(res.key)
-        log.warning(
-            "Discarded invalid cached LLM response; refetching once (key=%.12s)", res.key
-        )
+        log.warning("Discarded invalid cached LLM response; refetching once (key=%.12s)", res.key)
         return _parse(chat(system, parts, refresh=True, **chat_kw).text)
 
 
@@ -466,9 +472,7 @@ def load_checkpoint(run_dir: Path, key: str) -> GameDesign | None:
         if (run_dir / "design.key").read_text(encoding="utf-8").strip() != key:
             log.info("Analysis checkpoint stale (inputs changed) — will re-run the LLM")
             return None
-        return GameDesign.model_validate_json(
-            (run_dir / "design.json").read_text(encoding="utf-8")
-        )
+        return GameDesign.model_validate_json((run_dir / "design.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):  # missing/corrupt files; ValidationError ⊂ ValueError
         return None
 
@@ -565,11 +569,14 @@ def analyze_video_chunked(
             lines whose timestamps fall inside its window.
     """
     if len(segments) == 1:
-        return analyze_video(segments[0], instruct=instruct, transcript=(
-            format_transcript(transcript) if transcript else None
-        ))
+        return analyze_video(
+            segments[0],
+            instruct=instruct,
+            transcript=(format_transcript(transcript) if transcript else None),
+        )
 
     import logging
+
     log = logging.getLogger(__name__)
 
     designs: list[GameDesign] = []
@@ -587,16 +594,24 @@ def analyze_video_chunked(
         log.info("Analyzing segment %s", label)
         seg_transcript: str | None = None
         if transcript:
-            seg_transcript = format_transcript(
-                transcript,
-                start=windows[i][0],
-                end=windows[i][1],
-            ) or None
+            seg_transcript = (
+                format_transcript(
+                    transcript,
+                    start=windows[i][0],
+                    end=windows[i][1],
+                )
+                or None
+            )
         try:
             d = analyze_video(seg, instruct=instruct, transcript=seg_transcript)
             designs.append(d)
-            log.info("  Segment %s: '%s' — %d chars, %d scenes",
-                     label, d.title, len(d.characters), len(d.scenes))
+            log.info(
+                "  Segment %s: '%s' — %d chars, %d scenes",
+                label,
+                d.title,
+                len(d.characters),
+                len(d.scenes),
+            )
         except (ValueError, RuntimeError, KeyError, OSError, _OpenAIError) as e:
             log.warning("  Segment %s failed: %s", label, e)
 
@@ -639,7 +654,9 @@ def _merge_designs(designs: list[GameDesign]) -> GameDesign:
     for d in designs[1:]:
         for o in d.objects:
             key = o.name.lower()
-            if key not in obj_map or len(o.visual) + len(o.behavior) > len(obj_map[key].visual) + len(obj_map[key].behavior):
+            if key not in obj_map or len(o.visual) + len(o.behavior) > len(
+                obj_map[key].visual
+            ) + len(obj_map[key].behavior):
                 obj_map[key] = o
     base.objects = list(obj_map.values())
 
@@ -695,8 +712,22 @@ def _merge_designs(designs: list[GameDesign]) -> GameDesign:
 # ── Character identity matching ──────────────────────────────────────────────
 
 _FEATURE_KEYWORDS = {
-    "hair": ["blonde", "brown", "black", "red", "white", "gray", "grey", "bald",
-             "long", "short", "curly", "straight", "ponytail", "braid"],
+    "hair": [
+        "blonde",
+        "brown",
+        "black",
+        "red",
+        "white",
+        "gray",
+        "grey",
+        "bald",
+        "long",
+        "short",
+        "curly",
+        "straight",
+        "ponytail",
+        "braid",
+    ],
     "build": ["tall", "short", "slim", "muscular", "stocky", "thin", "heavy", "athletic"],
     "skin": ["pale", "dark", "tan", "olive", "fair", "brown"],
     "age": ["young", "old", "elderly", "middle-aged", "teen", "child", "adult"],
@@ -721,6 +752,7 @@ def _name_similarity(a: str, b: str) -> float:
 
     Handles: exact match, substring, slash-separated aliases, shared words.
     """
+
     def _norm(s: str) -> list[str]:
         # Split on /, |, or " / " to handle "John / The Stranger"
         parts: list[str] = []
@@ -794,17 +826,21 @@ def _absorb_character(existing: Character, incoming: Character) -> None:
     """
     # Compare visuals — if different enough, incoming is a new persona
     overlap = _visual_feature_overlap(existing.visual, incoming.visual)
-    visual_differs = overlap < 0.85 or existing.visual.lower().strip() != incoming.visual.lower().strip()
+    visual_differs = (
+        overlap < 0.85 or existing.visual.lower().strip() != incoming.visual.lower().strip()
+    )
 
     if visual_differs:
         # Check this isn't already captured as a persona
         existing_visuals = {existing.visual.lower()} | {p.visual.lower() for p in existing.personas}
         if incoming.visual.lower().strip() not in existing_visuals:
-            existing.personas.append(Persona(
-                outfit=incoming.visual.split(",")[0][:60] if "," in incoming.visual else "",
-                visual=incoming.visual,
-                context=f"alt appearance from {incoming.name}",
-            ))
+            existing.personas.append(
+                Persona(
+                    outfit=incoming.visual.split(",")[0][:60] if "," in incoming.visual else "",
+                    visual=incoming.visual,
+                    context=f"alt appearance from {incoming.name}",
+                )
+            )
 
     # Upgrade fields if incoming is more detailed
     if len(incoming.visual) > len(existing.visual):
@@ -834,4 +870,3 @@ def _absorb_character(existing: Character, incoming: Character) -> None:
         if n and n.lower() not in existing_names:
             existing.name = f"{existing.name} / {n}"
             existing_names.add(n.lower())
-

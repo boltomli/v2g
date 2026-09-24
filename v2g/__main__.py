@@ -20,19 +20,22 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("source", help="Video file path or URL (YouTube, direct link, etc.)")
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         type=Path,
         default=None,
         help="Override run directory (default: projects/<timestamp>_<source>/ — new per run)",
     )
     parser.add_argument(
-        "-d", "--detail",
+        "-d",
+        "--detail",
         action="store_true",
         default=False,
         help="Detailed mode: send full video to LLM for deep analysis (requires video-capable model)",
     )
     parser.add_argument(
-        "-i", "--instruct",
+        "-i",
+        "--instruct",
         type=str,
         default=None,
         help="Optional style instruction, e.g. 'change to medieval', 'vampire theme', 'Lord of the Rings style'",
@@ -44,9 +47,10 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         from v2g.pipeline import run
+
         project_path = run(args.source, args.output, detailed=args.detail, instruct=args.instruct)
         console.print(
-            f'\n[bold green]Done![/] Open the project in Godot 4.x:\n'
+            f"\n[bold green]Done![/] Open the project in Godot 4.x:\n"
             f'  godot --editor --path "{project_path}"'
         )
     except FileNotFoundError as e:

@@ -27,9 +27,7 @@ def _design() -> GameDesign:
         style="s",
         objects=[],
         scenes=[],
-        characters=[
-            Character(name=name, role="npc", visual="v") for name in _CHAR_NAMES
-        ],
+        characters=[Character(name=name, role="npc", visual="v") for name in _CHAR_NAMES],
     )
 
 

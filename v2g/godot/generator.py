@@ -32,10 +32,14 @@ def _finalize_with_godot(project_root: Path) -> None:
     """
     godot = settings.godot_path
     steps = [
-        ([godot, "--headless", "--editor", "--quit-after", "20", "--path", str(project_root)],
-         "asset import"),
-        ([godot, "--headless", "--path", str(project_root), "--quit-after", "5"],
-         "startup validation"),
+        (
+            [godot, "--headless", "--editor", "--quit-after", "20", "--path", str(project_root)],
+            "asset import",
+        ),
+        (
+            [godot, "--headless", "--path", str(project_root), "--quit-after", "5"],
+            "startup validation",
+        ),
     ]
     for cmd, what in steps:
         try:
@@ -53,7 +57,8 @@ def _finalize_with_godot(project_root: Path) -> None:
             return
         output = (result.stdout or "") + (result.stderr or "")
         problems = [
-            ln for ln in output.splitlines()
+            ln
+            for ln in output.splitlines()
             if "SCRIPT ERROR" in ln or "Parse Error" in ln or "ERROR: Failed" in ln
         ]
         if problems:
@@ -65,9 +70,7 @@ def _finalize_with_godot(project_root: Path) -> None:
 def _gd_source_ok(source: str) -> bool:
     """Sanity: the text must actually look like GDScript."""
     stripped = source.lstrip()
-    return any(
-        stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name")
-    )
+    return any(stripped.startswith(kw) for kw in ("extends ", "@tool", "@export", "class_name"))
 
 
 def _check_script(project_root: Path, fname: str) -> list[str] | None:
@@ -79,17 +82,29 @@ def _check_script(project_root: Path, fname: str) -> list[str] | None:
     """
     try:
         result = subprocess.run(
-            [settings.godot_path, "--headless", "--path", str(project_root),
-             "--check-only", "--script", f"res://{fname}"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60, check=False,
+            [
+                settings.godot_path,
+                "--headless",
+                "--path",
+                str(project_root),
+                "--check-only",
+                "--script",
+                f"res://{fname}",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning("Script compile check skipped: %s", e)
         return None
     output = (result.stdout or "") + (result.stderr or "")
     return [
-        ln for ln in output.splitlines()
+        ln
+        for ln in output.splitlines()
         if "SCRIPT ERROR" in ln or "Parse Error" in ln or "ERROR: Failed" in ln
     ]
 
@@ -101,7 +116,8 @@ def _repair_scripts(
     from v2g import runlog
 
     report = "\n\n".join(
-        f"## {fname}\nGodot compile check said:\n" + "\n".join(errs)
+        f"## {fname}\nGodot compile check said:\n"
+        + "\n".join(errs)
         + f"\n\nCurrent source:\n```gdscript\n{scripts[fname]}\n```"
         for fname, errs in failures.items()
     )
@@ -165,13 +181,12 @@ def _validate_scripts(
             scripts[fname] = T.game_manager_script(design)
             (project_root / fname).write_text(scripts[fname], encoding="utf-8")
         elif fname == "vn_manager.gd":
-            log.error(
-                "Template-owned vn_manager.gd fails compile:\n%s", "\n".join(errs)
-            )
+            log.error("Template-owned vn_manager.gd fails compile:\n%s", "\n".join(errs))
         elif any(fname in src for f, src in scripts.items() if f != fname):
             log.error(
                 "Keeping %s despite parse errors — another script references it:\n%s",
-                fname, "\n".join(errs),
+                fname,
+                "\n".join(errs),
             )
         else:
             log.warning("Dropping %s (parse errors, unreferenced):\n%s", fname, "\n".join(errs))
@@ -182,7 +197,10 @@ def _validate_scripts(
 
 def _safe_name(title: str) -> str:
     """Sanitize a game title into a filesystem-safe directory name."""
-    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_").lower() or "game"
+    return (
+        "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_").lower()
+        or "game"
+    )
 
 
 def _asset_reference(design: GameDesign, key: str) -> str:
@@ -259,8 +277,10 @@ def _generate_scripts(design: GameDesign) -> dict[str, str]:
         cache.invalidate(res.key)
         log.warning("Discarded invalid cached scripts response; refetching once")
         res = chat(
-            T.LLM_SCRIPT_SYSTEM, [design_json],
-            temperature=0.3, refresh=True,
+            T.LLM_SCRIPT_SYSTEM,
+            [design_json],
+            temperature=0.3,
+            refresh=True,
         )
         parsed = _try_load_scripts(res.text)
     dump = runlog.llm_dump("scripts", res.text)  # keep the raw response either way
@@ -389,9 +409,7 @@ def generate(
     )
 
     # 4. main.tscn — visual-novel root (vn_manager + GameManager)
-    (project_root / "main.tscn").write_text(
-        T.main_scene(design, scripts), encoding="utf-8"
-    )
+    (project_root / "main.tscn").write_text(T.main_scene(design, scripts), encoding="utf-8")
 
     # 5. Write all scripts
     for fname, source in scripts.items():

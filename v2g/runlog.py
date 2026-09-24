@@ -54,11 +54,18 @@ def start_run(source: str, output_dir: Path | None = None) -> Path:
     _run_dir = directory
     _configure_logging(directory)
     if output_dir is not None and reused:
-        log.warning("Output directory %s already exists — run artifacts will be mixed into it", directory)
+        log.warning(
+            "Output directory %s already exists — run artifacts will be mixed into it", directory
+        )
     log.info("Run started: source=%s", source)
-    log.info("Run config: model=%s base_url=%s max_duration=%ds video_max_mb=%d api_key=%s",
-             settings.llm_model, settings.llm_base_url, settings.max_duration,
-             settings.video_max_mb, "set" if settings.llm_api_key else "MISSING")
+    log.info(
+        "Run config: model=%s base_url=%s max_duration=%ds video_max_mb=%d api_key=%s",
+        settings.llm_model,
+        settings.llm_base_url,
+        settings.max_duration,
+        settings.video_max_mb,
+        "set" if settings.llm_api_key else "MISSING",
+    )
     return directory
 
 

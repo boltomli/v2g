@@ -25,7 +25,7 @@ _VIDEO_SUFFIXES = (".mp4", ".mkv", ".webm", ".mov")
 
 def _run_yt_dlp(args: list[str]) -> str | None:
     """Run yt-dlp once; None on success, else a short failure description."""
-    result = subprocess.run(args, capture_output=True)
+    result = subprocess.run(args, capture_output=True, check=False)
     if result.returncode == 0:
         return None
     stderr = (result.stderr or b"").decode("utf-8", errors="replace")
@@ -43,9 +43,7 @@ def _usable_video(directory: Path) -> Path | None:
         (
             f
             for f in directory.iterdir()
-            if f.stem == "video"
-            and f.suffix.lower() in _VIDEO_SUFFIXES
-            and f.stat().st_size > 0
+            if f.stem == "video" and f.suffix.lower() in _VIDEO_SUFFIXES and f.stat().st_size > 0
         ),
         None,
     )
@@ -79,8 +77,10 @@ def _download_url(url: str, work_dir: Path) -> Path:
     sub_args = [
         "--write-subs",
         "--write-auto-subs",
-        "--sub-langs", "all,-live,-danmaku",
-        "--convert-subs", "srt",
+        "--sub-langs",
+        "all,-live,-danmaku",
+        "--convert-subs",
+        "srt",
     ]
     with cache.media_stage(entry) as stage:
         out_tpl = str(stage / "video.%(ext)s")
@@ -118,9 +118,13 @@ def _get_duration(video_path: Path) -> float:
     """Return video duration in seconds via ffprobe."""
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             str(video_path),
         ],
         capture_output=True,
@@ -139,10 +143,14 @@ def extract_frames(video_path: Path, out_dir: Path, interval: float = 2.0) -> li
     fps = 1.0 / interval
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-vf", f"fps={fps}",
-            "-fps_mode", "vfr",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"fps={fps}",
+            "-fps_mode",
+            "vfr",
             str(out_dir / "frame_%04d.png"),
         ],
         check=True,
@@ -190,8 +198,13 @@ def extract_keyframes(
     while len(frames) > max_frames and attempts < 4:
         threshold = min(threshold + 0.15, 0.95)
         attempts += 1
-        log.info("  %d frames > %d, raising threshold to %.2f (attempt %d)",
-                 len(frames), max_frames, threshold, attempts)
+        log.info(
+            "  %d frames > %d, raising threshold to %.2f (attempt %d)",
+            len(frames),
+            max_frames,
+            threshold,
+            attempts,
+        )
         # Clean up and re-extract
         for f in frames:
             f.unlink()
@@ -211,7 +224,9 @@ def extract_keyframes(
     # Fallback: if scene detection found very few frames (e.g. static video),
     # supplement with interval extraction
     if len(frames) < 5:
-        log.info("  Only %d scene-change frames — supplementing with interval extraction", len(frames))
+        log.info(
+            "  Only %d scene-change frames — supplementing with interval extraction", len(frames)
+        )
         duration = _get_duration(video_path)
         interval = max(duration / max_frames, 2.0)
         extra_dir = out_dir / "_interval"
@@ -239,11 +254,16 @@ def _run_scene_extract(video_path: Path, out_dir: Path, threshold: float) -> Non
     """Run ffmpeg scene-change detection, writing frames to *out_dir*."""
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-vf", f"select='gt(scene,{threshold:.2f})',setpts=N/FRAME_RATE/TB",
-            "-fps_mode", "vfr",
-            "-q:v", "2",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"select='gt(scene,{threshold:.2f})',setpts=N/FRAME_RATE/TB",
+            "-fps_mode",
+            "vfr",
+            "-q:v",
+            "2",
             str(out_dir / "frame_%04d.png"),
         ],
         capture_output=True,
@@ -353,11 +373,16 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 60) -> 
             end = min(start + segment_duration, duration)
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
-                    "-ss", f"{start:.2f}",
-                    "-i", str(video_path),
-                    "-t", f"{end - start:.2f}",
-                    "-c", "copy",
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{start:.2f}",
+                    "-i",
+                    str(video_path),
+                    "-t",
+                    f"{end - start:.2f}",
+                    "-c",
+                    "copy",
                     str(seg_path),
                 ],
                 capture_output=True,
@@ -374,14 +399,22 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 60) -> 
                 target_bitrate = int(settings.video_max_mb * 8 * 1024 / segment_duration)
                 subprocess.run(
                     [
-                        "ffmpeg", "-y",
-                        "-i", str(seg_path),
-                        "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                        "-b:v", f"{target_bitrate}k",
-                        "-b:a", "64k",
-                        "-bf", "0",
-                        "-force_key_frames", f"expr:gte(t,n_forced*{seg_len / 8:.3f})",
-                        "-preset", "fast",
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(seg_path),
+                        "-vf",
+                        "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                        "-b:v",
+                        f"{target_bitrate}k",
+                        "-b:a",
+                        "64k",
+                        "-bf",
+                        "0",
+                        "-force_key_frames",
+                        f"expr:gte(t,n_forced*{seg_len / 8:.3f})",
+                        "-preset",
+                        "fast",
                         str(compressed),
                     ],
                     capture_output=True,
@@ -392,7 +425,10 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 60) -> 
             leaves.extend(p.name for p in pieces)
             log.info(
                 "  Segment %d: %.0fs–%.0fs → %d piece(s), %s",
-                seg_idx, start, end, len(pieces),
+                seg_idx,
+                start,
+                end,
+                len(pieces),
                 ", ".join(f"{p.name} {p.stat().st_size / (1024 * 1024):.1f} MB" for p in pieces),
             )
             start = end
@@ -456,14 +492,22 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
             target_bitrate = int(max_mb * 8 * 1024 / max_dur)  # kbps
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
-                    "-i", str(upload),
-                    "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                    "-b:v", f"{target_bitrate}k",
-                    "-b:a", "64k",
-                    "-bf", "0",
-                    "-force_key_frames", f"expr:gte(t,n_forced*{upload_dur / 8:.3f})",
-                    "-preset", "fast",
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(upload),
+                    "-vf",
+                    "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                    "-b:v",
+                    f"{target_bitrate}k",
+                    "-b:a",
+                    "64k",
+                    "-bf",
+                    "0",
+                    "-force_key_frames",
+                    f"expr:gte(t,n_forced*{upload_dur / 8:.3f})",
+                    "-preset",
+                    "fast",
                     str(compressed),
                 ],
                 capture_output=True,

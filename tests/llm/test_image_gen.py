@@ -249,7 +249,7 @@ class _RangeHandler(BaseHTTPRequestHandler):
         rng = self.headers.get("Range")
         start, end = 0, len(self.data) - 1
         if rng and rng.startswith("bytes="):
-            first, _, last = rng[len("bytes="):].partition("-")
+            first, _, last = rng[len("bytes=") :].partition("-")
             start = int(first)
             if last:
                 end = min(int(last), len(self.data) - 1)

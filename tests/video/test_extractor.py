@@ -24,12 +24,18 @@ def _make_video(path: Path, *, size: str = "1080x1920", duration: int = 1) -> Pa
             "-hide_banner",
             "-loglevel",
             "error",
-            "-f", "lavfi",
-            "-i", f"testsrc2=size={size}:rate=5",
-            "-t", str(duration),
-            "-c:v", "libx264",
-            "-crf", "0",
-            "-g", "5",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size={size}:rate=5",
+            "-t",
+            str(duration),
+            "-c:v",
+            "libx264",
+            "-crf",
+            "0",
+            "-g",
+            "5",
             str(path),
         ],
         check=True,
@@ -49,7 +55,7 @@ def _fake_yt_dlp(
     """
     calls: list[list[str]] = []
 
-    def run(args, capture_output=True):
+    def run(args, capture_output=True, **kwargs):
         calls.append(list(args))
         if write_video:
             out = Path(str(args[args.index("-o") + 1]).replace("%(ext)s", "mp4"))
@@ -72,10 +78,14 @@ def test_compression_produces_encoder_compatible_dimensions(tmp_path, monkeypatc
     probe = subprocess.run(
         [
             "ffprobe",
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "json",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
             str(outputs[0]),
         ],
         check=True,
@@ -174,9 +184,7 @@ def test_split_video_caches_segments_across_runs(tmp_path, monkeypatch):
     expected = math.ceil(extractor._get_duration(source))
 
     segments = extractor.split_video(source, tmp_path / "run1", segment_duration=1)
-    assert [p.name for p in segments] == [
-        f"segment_{i:03d}.mp4" for i in range(expected)
-    ]
+    assert [p.name for p in segments] == [f"segment_{i:03d}.mp4" for i in range(expected)]
     assert all(p.is_file() and p.stat().st_size > 0 for p in segments)
 
     original_run = subprocess.run
@@ -224,5 +232,3 @@ def test_prepare_video_splits_when_compression_still_overshoots(tmp_path, monkey
     # ≥ trimmed duration: no content lost; ≤ 2× absorbs copy-boundary overlap
     # (each cut can duplicate up to one keyframe interval — 0.2s at 5 fps)
     assert 0.9 <= total <= 2.0
-
-

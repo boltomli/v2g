@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 # ── Crop region helpers ──────────────────────────────────────────────────────
 
+
 def _parse_spatial_hint(hint: str) -> tuple[float, float, float, float]:
     """Convert a natural-language spatial hint into a (x_frac, y_frac, w_frac, h_frac) crop.
 
@@ -67,9 +68,19 @@ def _parse_spatial_hint(hint: str) -> tuple[float, float, float, float]:
 def _get_video_duration(video_path: Path) -> float:
     """Return video duration in seconds."""
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-        capture_output=True, text=True, check=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return float(result.stdout.strip())
 
@@ -82,10 +93,21 @@ def probe_video_size(video_path: Path) -> tuple[int, int] | None:
     """
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,side_data_list",
-             "-of", "json", str(video_path)],
-            capture_output=True, text=True, check=True,
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,side_data_list",
+                "-of",
+                "json",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         streams = json.loads(result.stdout).get("streams") or []
         if not streams:
@@ -98,19 +120,36 @@ def probe_video_size(video_path: Path) -> tuple[int, int] | None:
                 break
         return width, height
     except (
-        OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError,
+        OSError,
+        subprocess.CalledProcessError,
+        ValueError,
+        KeyError,
+        TypeError,
     ):
         return None
 
 
 # ── Core extraction ──────────────────────────────────────────────────────────
 
+
 def _extract_frame(video_path: Path, timestamp: float, out_path: Path) -> Path:
     """Extract a single frame at *timestamp* seconds."""
     subprocess.run(
-        ["ffmpeg", "-y", "-ss", f"{timestamp:.2f}", "-i", str(video_path),
-         "-frames:v", "1", "-q:v", "2", str(out_path)],
-        capture_output=True, check=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{timestamp:.2f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(out_path),
+        ],
+        capture_output=True,
+        check=True,
     )
     return out_path
 
@@ -122,7 +161,8 @@ def _crop_image(src: Path, dst: Path, region: tuple[float, float, float, float])
     crop_filter = f"crop=iw*{w:.2f}:ih*{h:.2f}:iw*{x:.2f}:ih*{y:.2f}"
     subprocess.run(
         ["ffmpeg", "-y", "-i", str(src), "-vf", crop_filter, "-q:v", "2", str(dst)],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
     return dst
 
@@ -154,6 +194,7 @@ def _timestamps_for_entity(duration: float, count: int = 3, seed: int = 0) -> li
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
+
 
 def _capture_distinct(
     video_path: Path,
@@ -237,7 +278,9 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
     # ── 2. Character sprites ─────────────────────────────────────────────────
     characters = [c for c in design.characters if c.role != "narrator"]
     for char in characters:
-        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in char.name).strip("_").lower()
+        safe_name = (
+            "".join(c if c.isalnum() or c in "-_" else "_" for c in char.name).strip("_").lower()
+        )
         seed = zlib.crc32(char.name.encode("utf-8"))
         spatial_hint = ""
         # Try to find spatial hints from related objects
@@ -249,8 +292,13 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
 
         final = out_dir / f"char_{safe_name}.png"
         accepted = _capture_distinct(
-            video_path, duration, out_dir, final,
-            seed=seed, used_hashes=used_hashes, region=region,
+            video_path,
+            duration,
+            out_dir,
+            final,
+            seed=seed,
+            used_hashes=used_hashes,
+            region=region,
         )
         if accepted:
             assets[f"characters/{safe_name}"] = final
@@ -260,15 +308,21 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
 
     # ── 3. Object sprites (collectibles, obstacles, key objects) ─────────────
     key_objects = [
-        o for o in design.objects
+        o
+        for o in design.objects
         if o.role in ("collectible", "obstacle", "vehicle", "weapon", "decoration")
     ]
     for obj in key_objects:
-        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in obj.name).strip("_").lower()
+        safe_name = (
+            "".join(c if c.isalnum() or c in "-_" else "_" for c in obj.name).strip("_").lower()
+        )
         region = _parse_spatial_hint(obj.spatial) if obj.spatial else None
         final = out_dir / f"obj_{safe_name}.png"
         accepted = _capture_distinct(
-            video_path, duration, out_dir, final,
+            video_path,
+            duration,
+            out_dir,
+            final,
             seed=zlib.crc32(obj.name.encode("utf-8")),
             used_hashes=used_hashes,
             region=region,
@@ -282,7 +336,9 @@ def extract_assets(video_path: Path, design: GameDesign, out_dir: Path) -> dict[
 
     # ── 4. Scene backgrounds (first scene gets the main background) ──────────
     for i, scene in enumerate(design.scenes[1:], start=1):  # skip first (already have background)
-        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in scene.name).strip("_").lower()
+        safe_name = (
+            "".join(c if c.isalnum() or c in "-_" else "_" for c in scene.name).strip("_").lower()
+        )
         ts_ratio = i / max(len(design.scenes), 1)
         ts = duration * ts_ratio
         bg_path = out_dir / f"scene_{safe_name}.png"
