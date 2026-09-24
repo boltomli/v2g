@@ -44,6 +44,11 @@ from urllib.request import Request, urlopen
 
 from v2g.config import settings
 
+# Before any CUDA context exists: coalescable segments let the allocator return
+# memory to the driver — the VAE decode spike otherwise pins ~9.8 GiB reserved
+# on a 6 GiB card and every later allocation pages. User overrides win.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 log = logging.getLogger(__name__)
 
 
@@ -428,8 +433,16 @@ class QwenImage21Provider(ImageGenProvider):
 
         if not torch.cuda.is_available():
             log.info("imagegen: no CUDA GPU — running on CPU (very slow)")
+            pipe._v2g_low_vram = True
+            pipe.vae.enable_tiling()
             return pipe
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+        pipe._v2g_low_vram = vram_gb < 20
+        if pipe._v2g_low_vram:
+            # Untiled decode peaks past physical VRAM (fp32 upcast layers) — it
+            # pinned ~9.8 GiB reserved and has even tripped a Windows TDR reset.
+            # Tiles keep the spike inside the card.
+            pipe.vae.enable_tiling()
         if vram_gb >= 28:
             log.info("imagegen: %.0f GB VRAM — weights fully on GPU", vram_gb)
             return pipe.to("cuda")
@@ -469,13 +482,24 @@ class QwenImage21Provider(ImageGenProvider):
             img = img.convert("RGB")
         w, h = self._target_size(img.size, size)
         full = self._prompt(prompt, reference)
-        log.info("imagegen: %s → %dx%d @ %d steps: %s", image_path.name, w, h, self._steps, full)
+        log.info("imagegen: %s → %dx%d, %d steps: %s", image_path.name, w, h, self._steps, full)
+        if img.size != (w, h):
+            # Condition at the output size: at 1080x1922 the vision tokens alone
+            # double the prefix KV cache for no benefit (the target canvas is w×h).
+            img = img.resize((w, h))
+        kwargs: dict = {}
+        if getattr(self._pipe, "_v2g_low_vram", False):
+            # The prefix KV cache (~2 GB here) pushes the working set past physical
+            # VRAM so every denoise step pages over PCIe; recomputing the prefix is
+            # far cheaper than that.
+            kwargs["use_kv_cache"] = False
         out = self._pipe(
             prompt=full,
             image=img,
             width=w,
             height=h,
             num_inference_steps=self._steps,
+            **kwargs,
         ).images[0]
         out.save(image_path)
         return image_path

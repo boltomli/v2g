@@ -268,8 +268,11 @@ Setup:
    `.venv/Scripts/python -c "from v2g.llm.image_gen import prepare_model; prepare_model()"`
 3. Placement picks itself from VRAM (the bf16 text encoder alone is 17.5 GB):
    ≥28 GB → fully on GPU, ≥20 GB → model CPU offload, else sequential
-   offload (one module at a time). On a 6 GB laptop GPU expect roughly
-   1–3 minutes per asset at the 1024 px / 40-step defaults.
+   offload with the GGUF denoiser kept resident. On a 6 GB RTX 4050 laptop
+   the low-VRAM path also disables the prefix KV cache (~2 GB) and expands
+   allocator segments — without that every step pages over PCIe at ~100 s/step.
+   Measured: **~8 min per asset at the 1024 px / 40-step defaults**, ~4.5 min
+   with `V2G_IMAGEGEN_STEPS=20`; model load ~35 s on first transform.
 
 A failing asset keeps its original frame (logged) — image generation can
 never fail a run. `V2G_IMAGEGEN_MODEL` overrides the model root (e.g. the

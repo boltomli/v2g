@@ -108,6 +108,51 @@ def test_plain_non_linear_weights_dequantizes_direct_read_quants():
     assert isinstance(holder.proj.weight, gguf_utils.GGUFParameter)
 
 
+def test_transform_resizes_condition_and_disables_kv_cache_on_low_vram(tmp_path):
+    """Low-VRAM placement: condition at output size, no prefix KV cache."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    calls: list[dict] = []
+
+    class FakePipe:
+        _v2g_low_vram = True
+
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            result = SimpleNamespace(
+                images=[Image.new("RGB", (kwargs["width"], kwargs["height"]), "red")]
+            )
+            return result
+
+    src = tmp_path / "a.png"
+    Image.new("RGB", (1080, 1922), "blue").save(src)
+    provider = QwenImage21Provider(steps=7, max_side=1024)
+    provider._pipe = FakePipe()  # _load short-circuits on a preset pipe
+
+    out = provider.transform(src, "oil style", reference="ref")
+
+    assert out == src
+    kw = calls[0]
+    assert (kw["width"], kw["height"]) == (576, 1024)
+    assert kw["image"].size == (576, 1024)  # condition resized to the canvas
+    assert kw["use_kv_cache"] is False
+    assert kw["num_inference_steps"] == 7
+    with Image.open(src) as check:
+        assert check.size == (576, 1024)  # saved in place at the new size
+
+    # Plenty of VRAM: KV cache stays on, nothing extra is passed.
+    class BigPipe(FakePipe):
+        _v2g_low_vram = False
+
+    calls.clear()
+    provider._pipe = BigPipe()
+    Image.new("RGB", (576, 1024), "blue").save(src)
+    provider.transform(src, "oil style")
+    assert "use_kv_cache" not in calls[0]
+
+
 def test_place_strategy_depends_on_vram_and_gguf(monkeypatch):
     """6 GB + GGUF keeps the denoiser resident; bigger cards offload heavier."""
     import types
@@ -119,6 +164,14 @@ def test_place_strategy_depends_on_vram_and_gguf(monkeypatch):
     class FakePipe:
         def __init__(self):
             self.actions: list = []
+            self.vae = self._FakeVae(self)
+
+        class _FakeVae:
+            def __init__(self, owner):
+                self._owner = owner
+
+            def enable_tiling(self):
+                self._owner.actions.append("vae_tiling")
 
         def to(self, device):
             self.actions.append(("to", device))
@@ -143,17 +196,17 @@ def test_place_strategy_depends_on_vram_and_gguf(monkeypatch):
     QwenImage21Provider._place(pipe, gguf=True)
     # The GGUF tensor cannot survive meta-device offload — it must stay resident.
     assert pipe._exclude_from_cpu_offload == ["transformer"]
-    assert pipe.actions == ["sequential_offload"]
+    assert pipe.actions == ["vae_tiling", "sequential_offload"]  # tiles tame the decode spike
 
     pipe = FakePipe()
     QwenImage21Provider._place(pipe, gguf=False)
     assert getattr(pipe, "_exclude_from_cpu_offload", []) == []  # plain bf16: meta-safe
-    assert pipe.actions == ["sequential_offload"]
+    assert pipe.actions == ["vae_tiling", "sequential_offload"]
 
     with_vram(24)
     pipe = FakePipe()
     QwenImage21Provider._place(pipe, gguf=True)
-    assert pipe.actions == ["model_offload"]
+    assert pipe.actions == ["model_offload"]  # roomy cards skip tiling
 
     with_vram(32)
     pipe = FakePipe()
