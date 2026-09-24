@@ -236,28 +236,65 @@ def _restyle_assets(
     assets: dict[str, Path],
     instruct: str | None,
 ) -> None:
-    """Re-draw each extracted asset in the --instruct style, in place.
+    """Re-draw each extracted asset in a target style, in place.
 
-    Gated on *instruct*: without a style instruction the raw frames are the
-    correct output. One failing asset keeps its original frame — image
-    generation is an enhancement, never a reason for a run to fail.
+    Trigger: an explicit ``-i/--instruct`` (mandatory — a request that cannot
+    run is reported, never silently dropped) or ``V2G_IMAGEGEN_AUTORESTYLE``
+    (auto: the prompt is the design's own style summary of the source video).
+    Without a style request the raw frames are the correct output. One failing
+    asset keeps its original frame — image generation can never fail a run.
     """
-    if not instruct or not assets:
+    if not assets:
         return
     from v2g import runlog
-    from v2g.llm.image_gen import get_provider
+    from v2g.llm.image_gen import NullProvider, get_provider
+
+    request = (instruct or "").strip()
+    if request:
+        style = request
+    elif settings.imagegen_autorestyle:
+        style = design.style.strip()
+        if not style:
+            log.log(
+                runlog.NOTICE,
+                "Auto-restyle on but the design has no style summary — keeping raw frames",
+            )
+            return
+    else:
+        return
 
     provider = get_provider()
-    if not provider.is_available():
+    unfulfilled: str | None = None
+    if isinstance(provider, NullProvider):
+        unfulfilled = "V2G_IMAGEGEN_PROVIDER is unset (raw frames are the configured default)"
+    elif not provider.is_available():
+        unfulfilled = "the configured imagegen provider is not ready (see its log lines above)"
+    if unfulfilled is not None:
+        if request:
+            log.warning(
+                "-i/--instruct given but assets were NOT restyled: %s — install with "
+                "`uv sync --extra imagegen` and set V2G_IMAGEGEN_PROVIDER=qwen",
+                unfulfilled,
+            )
+        else:
+            log.log(runlog.NOTICE, "Auto-restyle skipped: %s", unfulfilled)
         return
-    log.log(runlog.NOTICE, "Restyling %d asset(s) with imagegen", len(assets))
+
+    mode = "" if request else " (auto)"
+    log.log(runlog.NOTICE, "Restyling %d asset(s) with imagegen%s", len(assets), mode)
+    failures = 0
     for key, path in list(assets.items()):
         try:
-            assets[key] = provider.transform(
-                path, instruct, reference=_asset_reference(design, key)
-            )
+            assets[key] = provider.transform(path, style, reference=_asset_reference(design, key))
         except Exception as e:  # noqa: BLE001 — any failure keeps the run's original frame
+            failures += 1
             log.warning("Image generation failed for %s — keeping original: %s", key, e)
+    if failures and request:
+        log.warning(
+            "Style instruction given but %d/%d asset(s) kept their original frames",
+            failures,
+            len(assets),
+        )
 
 
 def _generate_scripts(design: GameDesign) -> dict[str, str]:

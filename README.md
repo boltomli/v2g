@@ -106,6 +106,7 @@ All settings via environment variables (or `.env` file):
 | `V2G_IMAGEGEN_STYLE` | — | Style prefix prepended to all image-gen prompts |
 | `V2G_IMAGEGEN_STEPS` | `40` | Image-gen denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
+| `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets even without `-i` (prompt = `design.style`) |
 
 ## Development
 
@@ -138,7 +139,7 @@ v2g/
 │   ├── video/
 │   │   ├── extractor.py     # frame extraction (+ subtitle download for URLs)
 │   │   ├── dialogue.py      # subtitle transcript extraction (source language)
-│   │   └── asset_extractor.py  # seeded, hash-deduplicated asset frames
+│   │   ├── asset_extractor.py  # scene-anchored, hash-deduplicated asset frames
 │   ├── llm/
 │   │   ├── client.py        # OpenAI API wrapper
 │   │   └── analyzer.py      # frames/video → bilingual game design

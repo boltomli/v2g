@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     imagegen_style: str = ""  # global style prefix for all image gen prompts
     imagegen_steps: int = 40  # denoising steps (Qwen's default)
     imagegen_max_side: int = 1024  # longest output edge — lower to save RAM/VRAM
+    imagegen_autorestyle: bool = False  # redraw assets even without -i; prompt = design.style
 
     # Output
     output_root: Path = Path("projects")

@@ -238,24 +238,50 @@ After LLM analysis, the pipeline extracts visual assets from the source video:
 - **Background**: A representative frame from the video midpoint → `assets/background.png`
 - **Characters**: Frames from a per-entity seeded time window, cropped using the
   LLM's spatial descriptions → `assets/char_<name>.png`
-- **Objects**: Frames for collectibles, weapons, decoration objects → `assets/obj_<name>.png`
+- **Objects**: key-object roles match on any slash-separated token with the
+  Chinese glosses folded in (`decoration / 身份标识`, `身份标识 / 互动道具`,
+  `装饰 / 遮挡物` all hit the key set), UI-layer props (spatial/icons that
+  live in a panel, never in a frame) are skipped, and each object is anchored
+  to the scene that names it — bigram overlap between the object's name (or,
+  for worn props, its `visual`/`behavior` naming the wearer) and the scene's
+  text. Sampling then happens inside that scene's **establishing shot = the
+  shot starting at the boundary (video start or detected cut) NEAREST the
+  scene's timeline cell, sampled from its midpoint** (cells are equal-duration
+  and misalign cuts — measured: "longest shot" picked a4.5 s dialogue beat
+  over the2.5 s prop wide; "first segment of the cell" picked a leftover tail
+  of the previous scene), cropped by the object's `spatial` hint. Worn props
+  honor body部位 keywords too
+  (胸前 → chest band, 腰侧 → waist band) so the sprite shows the wear region,
+  not the wearer's face. Objects with no scene match keep the seeded window.
 - **Scenes**: Additional background frames for multi-scene videos → `assets/scene_<name>.png`
 
 **Distinctness guarantee**: each entity samples its own window of the timeline
-(name-seeded), and every accepted sprite's SHA-256 is checked against everything
-already extracted — duplicates are re-taken with jittered seeds. One entity can
-never receive another entity's byte-identical frame.
+(scene establishing shot for objects, name-seeded otherwise), and every accepted
+sprite's SHA-256 is checked against everything already extracted — duplicates
+are re-taken with jittered stamps. One entity can never receive another
+entity's byte-identical frame.
 
-Spatial cropping uses the `spatial` field from `GameObject` analysis:
-- "left side of frame" → crops to left 40%
-- "center" → crops to center 60%
-- "right third" → crops to right 40%
+Spatial cropping uses the `spatial` field from `GameObject` analysis — English
+and Chinese framing words both parse (the LLM answers in the video's language):
+- "left side of frame" / "画面左侧近景" → crops to left 40%
+- "center" / "骑士胸口正中" → crops to center 60%
+- "right third" / "右腰侧" → crops to right 40%
+- "上方正中，顶部" → top-center 50% × top 45%
 - No hint → full frame
 
 ### Image generation (optional, local)
 
-With `-i/--instruct`, extracted assets can be re-drawn in that style by a
-**local Qwen-Image-2.1** model instead of shipping raw video frames:
+Extracted assets can be re-drawn in a target style by a **local Qwen-Image-2.1**
+model instead of shipping raw video frames. Two triggers:
+
+- **`-i/--instruct <style>` — mandatory.** The run must restyle; if no image-gen
+  backend can run (provider unset, CUDA/deps missing), it logs an explicit
+  warning that assets were **NOT** restyled instead of silently skipping.
+- **`V2G_IMAGEGEN_AUTORESTYLE=1` — automatic.** No `-i` needed: the prompt is
+  the design's own `style` summary of the source video. A skipped run is
+  reported at NOTICE level (not silently).
+
+Providers:
 
 - **NullProvider** (default, `V2G_IMAGEGEN_PROVIDER` unset): no-op — assets are
   the raw extracted frames, zero model involvement.
@@ -292,6 +318,7 @@ full bf16 repo on a big-GPU machine).
 | `V2G_IMAGEGEN_STYLE` | — | Global style prefix prepended to all prompts |
 | `V2G_IMAGEGEN_STEPS` | `40` | Denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge (aspect kept, dims ÷32) |
+| `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets without `-i` (prompt = `design.style`) |
 
 To implement a new provider: subclass `ImageGenProvider` in
 `v2g/llm/image_gen.py`, implement `transform()` and `is_available()`, then
