@@ -48,11 +48,17 @@ def _file_to_content(path: Path) -> dict:
 
 @dataclass(frozen=True)
 class ChatResult:
-    """One raw response plus cache provenance (transport-layer output)."""
+    """One raw response plus cache provenance and transport finish reason.
+
+    `finish` is the API's finish_reason for fresh responses ("stop",
+    "length", "content_filter"); cache hits default to "stop" — anything
+    else is never stored.
+    """
 
     text: str
     cached: bool
     key: str
+    finish: str = "stop"
 
 
 def chat(
@@ -126,4 +132,4 @@ def chat(
         )
     else:
         cache.put(key, text)
-    return ChatResult(text, False, key)
+    return ChatResult(text, False, key, choice.finish_reason or "stop")

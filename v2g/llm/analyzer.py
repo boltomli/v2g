@@ -6,6 +6,7 @@ visual style, spatial layout, and gameplay mechanics.
 """
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
@@ -13,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 from v2g import cache, runlog
 from v2g.config import settings
 from v2g.llm import jsonfix
-from v2g.llm.client import chat
+from v2g.llm.client import ChatResult, chat
 from v2g.llm.errors import LLMOutputError
 from v2g.video.dialogue import TranscriptLine, format_transcript
 from v2g.video.extractor import _get_duration
@@ -351,18 +352,36 @@ class GameDesign(BaseModel):
         return self.scenes
 
 
+def _normalize(data: dict) -> dict:
+    """Pre-process a decoded candidate: scene_transitions from/to → source/destination,
+    legacy `levels` key → `scenes`."""
+    if "scene_transitions" in data:
+        for t in data["scene_transitions"]:
+            if "from" in t and "source" not in t:
+                t["source"] = t.pop("from")
+            if "to" in t and "destination" not in t:
+                t["destination"] = t.pop("to")
+    if "levels" in data and "scenes" not in data:
+        data["scenes"] = data.pop("levels")
+    return data
+
+
 def _parse(raw: str) -> GameDesign:
     """Clean, repair and parse LLM output into GameDesign.
 
-    Repairs markdown fences, surrounding prose, and truncation at max_tokens
-    (response cut mid-document). If nothing parses, the raw response is dumped
-    to <run>/llm/ and LLMOutputError says where to look.
+    Repairs markdown fences, surrounding prose, stray tokens mid-document
+    (deleted at the decode-error position), and truncation at max_tokens.
+    Repairs yield several candidate dicts — each is normalized and validated
+    in turn, so a repair that decodes but mangles a required field is skipped
+    in favor of a fuller one. If nothing parses, the raw response is dumped to
+    <run>/llm/ and LLMOutputError says where to look.
     """
     import json as _json
 
     dump = runlog.llm_dump("analysis", raw)  # keep the raw response either way
+    where = f" Raw response saved to {dump}." if dump else ""
     last_err: Exception | None = None
-    data: dict | None = None
+    direct: dict | None = None
     for cand in jsonfix.json_candidates(raw):
         try:
             parsed = _json.loads(cand)
@@ -370,35 +389,40 @@ def _parse(raw: str) -> GameDesign:
             last_err = e
             continue
         if isinstance(parsed, dict):
-            data = parsed
+            direct = parsed
             break
         last_err = ValueError(f"top-level JSON value is {type(parsed).__name__}, not an object")
-    if data is None:
-        data = jsonfix.salvage(raw)
-    if data is None:
-        where = f" Raw response saved to {dump}." if dump else ""
+
+    # A clean decode is validated alone: schema failures there are the model's,
+    # and no text repair can add fields that were never emitted.
+    stream: Iterator[dict] = (
+        iter([direct]) if direct is not None else jsonfix.repair_candidates(raw)
+    )
+    first_val_err: ValidationError | None = None
+    for data in stream:
+        try:
+            return GameDesign.model_validate(_normalize(data))
+        except ValidationError as e:
+            if first_val_err is None:
+                first_val_err = e
+    if first_val_err is None:
         raise LLMOutputError(
             f"Cannot parse LLM design JSON: {last_err}.{where}"
             " If the response was truncated, raise max_tokens or shorten the design."
         )
+    raise LLMOutputError(
+        f"LLM design failed validation: {first_val_err}.{where}"
+    ) from first_val_err
 
-    # Pre-process: handle from/to in scene_transitions
-    if "scene_transitions" in data:
-        for t in data["scene_transitions"]:
-            if "from" in t and "source" not in t:
-                t["source"] = t.pop("from")
-            if "to" in t and "destination" not in t:
-                t["destination"] = t.pop("to")
 
-    # Backward compat: map "levels" → "scenes" if present
-    if "levels" in data and "scenes" not in data:
-        data["scenes"] = data.pop("levels")
-
-    try:
-        return GameDesign.model_validate(data)
-    except ValidationError as e:
-        where = f" Raw response saved to {dump}." if dump else ""
-        raise LLMOutputError(f"LLM design failed validation: {e}.{where}") from e
+def _design_from(res: ChatResult) -> GameDesign:
+    """Parse one transport result — content filtering is not a JSON problem."""
+    if res.finish == "content_filter":
+        raise LLMOutputError(
+            "LLM response was content-filtered (finish=content_filter) — unusable "
+            "and never cached; check the input frames against the provider's policy"
+        )
+    return _parse(res.text)
 
 
 def _request_design(system: str, parts: list[str | Path], **chat_kw) -> GameDesign:
@@ -410,13 +434,13 @@ def _request_design(system: str, parts: list[str | Path], **chat_kw) -> GameDesi
     """
     res = chat(system, parts, **chat_kw)
     try:
-        return _parse(res.text)
+        return _design_from(res)
     except LLMOutputError:
         if not res.cached:
             raise
         cache.invalidate(res.key)
         log.warning("Discarded invalid cached LLM response; refetching once (key=%.12s)", res.key)
-        return _parse(chat(system, parts, refresh=True, **chat_kw).text)
+        return _design_from(chat(system, parts, refresh=True, **chat_kw))
 
 
 def analysis_key(

@@ -73,6 +73,27 @@ def test_valid_cached_response_is_used_as_is(monkeypatch, tmp_path):
     assert fake.calls == 1
 
 
+def test_content_filtered_response_fails_clearly_without_refetch(monkeypatch, tmp_path):
+    """A filtered response must be named as such, not as a JSON/truncation problem."""
+    monkeypatch.setattr(settings, "output_root", tmp_path)
+    fake = _FakeChat(
+        [
+            ChatResult(
+                "The request was rejected because it was considered high risk",
+                cached=False,
+                key="fresh",
+                finish="content_filter",
+            )
+        ]
+    )
+    monkeypatch.setattr(analyzer, "chat", fake)
+
+    with pytest.raises(LLMOutputError, match="content-filtered"):
+        analyzer._request_design("sys", ["msg"])
+
+    assert fake.calls == 1  # the same input would be filtered again — never re-pay
+
+
 def test_generator_refreshes_cached_bad_scripts(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "output_root", tmp_path)
     good = json.dumps({"game_manager.gd": "extends Node\nfunc score_changed(_s): pass\n"})

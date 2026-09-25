@@ -166,15 +166,20 @@ def _validate_scripts(
         return scripts
 
     repairable = {f: e for f, e in failures.items() if f != "vn_manager.gd"}
+    repaired: dict[str, str] = {}
     if repairable:
-        for fname, source in _repair_scripts(design, scripts, repairable).items():
-            log.log(runlog.NOTICE, "LLM repair fixed %s", fname)
+        repaired = _repair_scripts(design, scripts, repairable)
+        for fname, source in repaired.items():
             (project_root / fname).write_text(source, encoding="utf-8")
             scripts[fname] = source
 
     for fname in list(failures):
         errs = _check_script(project_root, fname)
         if not errs:
+            if fname in repaired:
+                # Only now is the repair proven — a source that still failed
+                # the re-check below must never be announced as fixed.
+                log.log(runlog.NOTICE, "LLM repair fixed %s", fname)
             continue  # repaired cleanly
         if fname == "game_manager.gd":
             log.warning("game_manager.gd still fails compile — using template")

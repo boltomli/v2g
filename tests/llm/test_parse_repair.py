@@ -63,6 +63,29 @@ def test_parse_truncated_after_comma_is_salvaged():
     assert design.objects == []
 
 
+def test_parse_stray_token_mid_document_is_repaired():
+    """Regression: a stray `",` the model emitted mid-JSON must not lose the tail.
+
+    Real run (001 segment): `…要素"],","controls":…` broke the decode at that
+    point; cut-back salvage kept only the five keys before the error and the
+    segment died on missing controls/style/objects. A deletion repair keeps
+    the whole document, and schema validation must skip the parseable-but
+    mangled variant (key `,controls`) in favor of the exact one.
+    """
+    raw = (
+        '{"title":"T","genre":"g","summary":"s","mechanics":["m"],'
+        '"controls":["c"],"style":"st","objects":[]}'
+    )
+    broken = raw.replace('],"controls"', '],","controls"')
+    assert broken != raw  # the corruption actually landed
+
+    design = _parse(broken)
+
+    assert design.controls == ["c"]  # not the mangled `,controls` variant
+    assert design.style == "st"
+    assert design.objects == []
+
+
 def test_parse_garbage_raises_llm_output_error():
     with pytest.raises(LLMOutputError) as exc:
         _parse("not json at all")

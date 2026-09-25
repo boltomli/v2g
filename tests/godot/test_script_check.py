@@ -95,6 +95,32 @@ def test_validate_keeps_llm_repaired_script(tmp_path, monkeypatch, caplog):
     )
 
 
+def test_no_fix_notice_when_repair_output_still_broken(tmp_path, monkeypatch, caplog):
+    """NOTICE must mean verified, not merely returned.
+
+    Real run: "LLM repair fixed game_manager.gd" was logged before the
+    re-check, then contradicted a beat later by "still fails compile — using
+    template". A repair that still fails must fall back silently.
+    """
+    from v2g import runlog
+
+    proj = _project(tmp_path)
+    broken = "extends CanvasLayer\n# _broken_\n"
+    (proj / "alliance_map.gd").write_text(broken, encoding="utf-8")
+    monkeypatch.setattr(G, "_check_script", _fake_check)
+    monkeypatch.setattr(
+        G,
+        "_repair_scripts",
+        lambda d, s, fail: {"alliance_map.gd": broken},  # "repair" that changed nothing
+    )
+
+    with caplog.at_level(runlog.NOTICE, logger="v2g.godot.generator"):
+        out = G._validate_scripts(proj, _design(), {"alliance_map.gd": broken})
+
+    assert "alliance_map.gd" not in out  # unreferenced + still broken → dropped
+    assert not any(r.levelno == runlog.NOTICE for r in caplog.records)
+
+
 def test_validate_falls_back_when_repair_fails(tmp_path, monkeypatch):
     """Still-broken scripts: extras dropped, game_manager → template, VN kept."""
     proj = _project(tmp_path)
