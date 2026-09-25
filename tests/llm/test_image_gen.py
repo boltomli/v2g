@@ -52,16 +52,13 @@ def test_qwen_availability_tracks_optional_dependencies(monkeypatch):
     assert provider.is_available() is True
 
 
-def test_prompt_joins_style_instruction_reference(monkeypatch):
+def test_prompt_prepends_the_global_style_prefix(monkeypatch):
     monkeypatch.setattr(settings, "imagegen_style", "oil painting")
     provider = QwenImage21Provider()
-    assert (
-        provider._prompt("medieval castle", "tall knight")
-        == "oil painting, medieval castle, tall knight"
-    )
+    assert provider._prompt("medieval castle") == "oil painting, medieval castle"
     monkeypatch.setattr(settings, "imagegen_style", "")
-    assert provider._prompt("castle", "") == "castle"
-    assert provider._prompt("", "") == ""
+    assert provider._prompt("castle") == "castle"
+    assert provider._prompt("") == ""
 
 
 def test_target_size_caps_aspect_and_stays_on_grid():
@@ -131,7 +128,7 @@ def test_transform_resizes_condition_and_disables_kv_cache_on_low_vram(tmp_path)
     provider = QwenImage21Provider(steps=7, max_side=1024)
     provider._pipe = FakePipe()  # _load short-circuits on a preset pipe
 
-    out = provider.transform(src, "oil style", reference="ref")
+    out = provider.transform(src, "oil style")
 
     assert out == src
     kw = calls[0]
@@ -151,6 +148,37 @@ def test_transform_resizes_condition_and_disables_kv_cache_on_low_vram(tmp_path)
     Image.new("RGB", (576, 1024), "blue").save(src)
     provider.transform(src, "oil style")
     assert "use_kv_cache" not in calls[0]
+
+
+def test_transform_text_only_skips_the_condition_and_writes_to_dest(tmp_path):
+    """condition=False is the t2i candidate: no source pixels, result to dest."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    calls: list[dict] = []
+
+    class FakePipe:
+        _v2g_low_vram = False
+
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                images=[Image.new("RGB", (kwargs["width"], kwargs["height"]), "red")]
+            )
+
+    src = tmp_path / "a.png"
+    Image.new("RGB", (1080, 1922), "blue").save(src)
+    dest = tmp_path / "text.png"
+    provider = QwenImage21Provider(steps=7, max_side=1024)
+    provider._pipe = FakePipe()
+
+    out = provider.transform(src, "redraw brief", condition=False, dest=dest)
+
+    assert out == dest
+    assert calls[0]["image"] is None  # generated from the brief alone
+    assert (calls[0]["width"], calls[0]["height"]) == (576, 1024)  # aspect still from source
+    assert dest.is_file() and src.read_bytes() != dest.read_bytes()
 
 
 def test_place_strategy_depends_on_vram_and_gguf(monkeypatch):

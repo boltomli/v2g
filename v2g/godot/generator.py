@@ -10,13 +10,18 @@ Strategy:
 
 import json
 import logging
+import os
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from v2g.config import settings
 from v2g.godot import templates as T
 from v2g.llm import jsonfix
-from v2g.llm.analyzer import GameDesign
+from v2g.llm.analyzer import GameDesign, SceneDesign
 from v2g.llm.client import chat
 
 log = logging.getLogger(__name__)
@@ -208,8 +213,45 @@ def _safe_name(title: str) -> str:
     )
 
 
-def _asset_reference(design: GameDesign, key: str) -> str:
-    """Design-side visual context for an extracted asset key.
+# Kind-specific redraw mandates — each asset kind must change in its own way:
+# characters get a new look/clothes/pose, objects become standalone item art,
+# scenes are re-laid-out as a whole. The SUBJECT line is authoritative for what
+# the thing IS (the design is rewritten to the theme); the source frame only
+# shows what must NOT be copied — presentation, framing, pixels.
+_DIRECTIVES: dict[str, str] = {
+    "characters": (
+        "Redraw this CHARACTER as a full-body portrait in a dynamic action pose, drawn "
+        "fresh — never lifted from the source frame. Outfit, hairstyle and colors follow "
+        "the SUBJECT below; framing, stance and background must differ from the source "
+        "frame. Isolate the figure on a plain background."
+    ),
+    "objects": (
+        "Draw this OBJECT alone as standalone item art: one item as described in the "
+        "SUBJECT below, cut out and centered on a plain background — no scenery, no "
+        "characters, no other props in frame. Draw it fresh to fit the theme instead of "
+        "lifting it out of the source frame."
+    ),
+    "scenes": (
+        "Redesign this LOCATION as a wide game background: a fresh layout, palette, "
+        "lighting and props — never the source frame's composition. The SUBJECT below "
+        "defines what the place is; its whole look changes around that role. No "
+        "characters painted into the scene."
+    ),
+}
+_DIRECTIVES["background"] = _DIRECTIVES["scenes"]  # the main background is a scene view
+
+
+def _scene_subject(scene: SceneDesign) -> str:
+    parts = [f"{scene.name}: {scene.description}"]
+    if scene.layout:
+        parts.append(f"layout: {scene.layout}")
+    if scene.visual_theme:
+        parts.append(f"theme: {scene.visual_theme}")
+    return " | ".join(parts)
+
+
+def _asset_subject(design: GameDesign, key: str) -> str:
+    """Design-side subject description for an extracted asset key.
 
     Keys follow ``v2g.video.asset_extractor``: ``background``,
     ``characters/<safe>``, ``objects/<safe>``, ``scenes/<safe>`` — the safe
@@ -217,23 +259,135 @@ def _asset_reference(design: GameDesign, key: str) -> str:
     """
     kind, sep, name = key.partition("/")
     if kind == "background" and design.scenes:
-        scene = design.scenes[0]
-        return f"{scene.name}: {scene.description}"
+        return _scene_subject(design.scenes[0])
     if not sep:
         return ""
     if kind == "characters":
         return next(
-            (f"{c.name}, {c.visual}" for c in design.characters if T._safe(c.name) == name), ""
+            (
+                f"{c.name} ({c.role}): {c.visual}"
+                + (f"; actions: {c.behavior}" if c.behavior else "")
+                for c in design.characters
+                if T._safe(c.name) == name
+            ),
+            "",
         )
     if kind == "objects":
         return next(
-            (f"{o.name}, {o.visual}" for o in design.objects if T._safe(o.name) == name), ""
+            (f"{o.name} ({o.role}): {o.visual}" for o in design.objects if T._safe(o.name) == name),
+            "",
         )
     if kind == "scenes":
-        return next(
-            (f"{s.name}: {s.description}" for s in design.scenes if T._safe(s.name) == name), ""
-        )
+        return next((_scene_subject(s) for s in design.scenes if T._safe(s.name) == name), "")
     return ""
+
+
+def _redraw_prompt(design: GameDesign, key: str, style: str) -> str:
+    """Full redraw brief for one asset: theme, kind directive, subject."""
+    kind = key.partition("/")[0]
+    blocks = [f"Redraw in this theme: {style}", _DIRECTIVES.get(kind, _DIRECTIVES["scenes"])]
+    subject = _asset_subject(design, key)
+    if subject:
+        blocks.append(f"SUBJECT: {subject}")
+    return "\n\n".join(blocks)
+
+
+_JUDGE_SYSTEM = (
+    "You compare two AI redraws of one game asset against a brief and pick the better one. "
+    "Answer only with the requested JSON."
+)
+
+
+def _judge_redraw(style: str, brief: str, original: Path, ref: Path, text: Path) -> str | None:
+    """Let a vision model pick between the reference and the text-only redraw.
+
+    Returns ``"ref"`` / ``"text"``, or None when the judge cannot answer — the
+    caller then keeps whichever candidate changed the source most.
+    """
+    ask = (
+        f"Brief:\n{brief}\n\n"
+        f"Theme: {style}\n\n"
+        "Three images: (0) the source frame, (1) candidate 'ref' drawn WITH the source "
+        "frame as visual reference, (2) candidate 'text' drawn from the brief alone.\n"
+        "Pick the better candidate. It must follow the theme, show the SUBJECT as "
+        "described, and be drawn fresh — composed for the brief, not copied from the "
+        "source frame (different pose for a character, the object standing alone, a "
+        "redesigned scene). Reject a candidate that merely reproduces the source "
+        "frame's pixels, or one that fails to show the subject.\n"
+        'JSON only: {"pick": "ref" | "text", "reason": "one sentence"}'
+    )
+    try:
+        res = chat(_JUDGE_SYSTEM, [ask, original, ref, text], temperature=0.0, max_tokens=200)
+        data = jsonfix.salvage(res.text)
+    except Exception as e:  # noqa: BLE001 — a judge outage must never fail the run
+        log.warning("Redraw judge unavailable (%s)", e)
+        return None
+    pick = data.get("pick") if isinstance(data, dict) else None
+    if pick not in ("ref", "text"):
+        log.warning("Redraw judge answered unusably (%r) — using visual difference", res.text[:120])
+        return None
+    log.info("Redraw judge picked %s: %s", pick, data.get("reason", ""))
+    return pick
+
+
+def _visual_difference(a: Path, b: Path) -> float:
+    """0..1 mean channel difference of 32×32 thumbnails — how far a redraw moved."""
+    from PIL import Image
+
+    with Image.open(a) as ia, Image.open(b) as ib:
+        pa = ia.convert("RGB").resize((32, 32)).tobytes()
+        pb = ib.convert("RGB").resize((32, 32)).tobytes()
+    return sum(abs(x - y) for x, y in zip(pa, pb)) / (len(pa) * 255)
+
+
+@contextmanager
+def _candidates_dir(enabled: bool) -> Iterator[Path | None]:
+    """Where both A/B candidates are staged; None when disabled.
+
+    Inside a run they land in ``<run>/work/imagegen/`` (kept for comparison);
+    outside a run they go to a scratch directory removed on exit. Never raises:
+    when staging fails, the caller falls back to one in-place candidate.
+    """
+    from v2g import runlog
+
+    if not enabled:
+        yield None
+        return
+    run = runlog.run_dir()
+    if run is not None:
+        try:
+            kept = run / "work" / "imagegen"
+            kept.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning(
+                "imagegen: cannot stage A/B candidates (%s) — drawing one candidate in place", e
+            )
+            yield None
+            return
+        yield kept  # outside the try: consumer exceptions pass through untouched
+        return
+    try:
+        scratch = Path(tempfile.mkdtemp(prefix="v2g-imagegen-"))
+    except OSError as e:
+        log.warning(
+            "imagegen: cannot stage A/B candidates (%s) — drawing one candidate in place", e
+        )
+        yield None
+        return
+    try:
+        yield scratch
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """Overwrite *dst* with *src* atomically — a failed copy never truncates *dst*."""
+    tmp = dst.with_name(f"{dst.stem}.tmp{dst.suffix}")
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _restyle_assets(
@@ -246,8 +400,15 @@ def _restyle_assets(
     Trigger: an explicit ``-i/--instruct`` (mandatory — a request that cannot
     run is reported, never silently dropped) or ``V2G_IMAGEGEN_AUTORESTYLE``
     (auto: the prompt is the design's own style summary of the source video).
-    Without a style request the raw frames are the correct output. One failing
-    asset keeps its original frame — image generation can never fail a run.
+    Without a style request the raw frames are the correct output.
+
+    Every asset is redrawn from a kind-specific brief (new look/clothes/pose for
+    characters, the object alone, a redesigned scene). With ``V2G_IMAGEGEN_AB``
+    each asset gets two candidates — one drawn with the source frame as visual
+    context, one from the brief alone — and a vision judge keeps the better;
+    both are staged under ``<run>/work/imagegen/`` during a run (a scratch
+    directory otherwise) for comparison. One failing asset keeps its original
+    frame — image generation can never fail a run.
     """
     if not assets:
         return
@@ -288,12 +449,55 @@ def _restyle_assets(
     mode = "" if request else " (auto)"
     log.log(runlog.NOTICE, "Restyling %d asset(s) with imagegen%s", len(assets), mode)
     failures = 0
-    for key, path in list(assets.items()):
-        try:
-            assets[key] = provider.transform(path, style, reference=_asset_reference(design, key))
-        except Exception as e:  # noqa: BLE001 — any failure keeps the run's original frame
-            failures += 1
-            log.warning("Image generation failed for %s — keeping original: %s", key, e)
+    with _candidates_dir(settings.imagegen_ab) as cand_dir:
+        modes = (("ref", True), ("text", False)) if cand_dir else (("ref", True),)
+        for key, path in list(assets.items()):
+            brief = _redraw_prompt(design, key, style)
+            made: dict[str, Path] = {}
+            for name, condition in modes:
+                dest = cand_dir / f"{key.replace('/', '__')}.{name}.png" if cand_dir else None
+                try:
+                    made[name] = provider.transform(path, brief, condition=condition, dest=dest)
+                except Exception as e:  # noqa: BLE001 — a failed candidate just drops out
+                    log.warning("Image generation failed for %s (%s): %s", key, name, e)
+            if not made:
+                failures += 1
+                continue
+            if len(made) == 1:
+                pick = next(iter(made))
+            else:
+                pick = _judge_redraw(style, brief, path, made["ref"], made["text"])
+                if pick is None:
+                    try:
+                        pick = max(made, key=lambda m: _visual_difference(path, made[m]))
+                        log.info(
+                            "imagegen: no judge pick for %s — kept the redraw that "
+                            "changed the source most (%s)",
+                            key,
+                            pick,
+                        )
+                    except Exception as e:  # noqa: BLE001 — unreadable candidate
+                        pick = next(iter(made))
+                        log.warning(
+                            "imagegen: cannot compare candidates for %s (%s) — keeping the %s one",
+                            key,
+                            e,
+                            pick,
+                        )
+            if made[pick] != path:
+                try:
+                    _replace(made[pick], path)  # atomic: the original survives a failed copy
+                except Exception as e:  # noqa: BLE001 — any failure keeps the run's original frame
+                    failures += 1
+                    log.warning("Image generation failed for %s — keeping original: %s", key, e)
+                    continue
+            staged = cand_dir if runlog.run_dir() is not None and len(made) == 2 else ""
+            log.info(
+                "imagegen: %s ← %s redraw%s",
+                key,
+                pick,
+                f" (candidates in {staged})" if staged else "",
+            )
     if failures and request:
         log.warning(
             "Style instruction given but %d/%d asset(s) kept their original frames",

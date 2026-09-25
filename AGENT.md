@@ -25,7 +25,7 @@ Video (file / URL)
   │                              ┌────────────────────────┘
   │                              ▼
   │                      [Image Gen Provider] ← optional (V2G_IMAGEGEN_PROVIDER=qwen)
-  │                       (style transfer)
+  │                       (per-kind redraw: A/B candidates + judge)
   │                              │
   └──────────────────────────────┼───────────────────────────────┘
                                  ▼
@@ -277,17 +277,42 @@ model instead of shipping raw video frames. Two triggers:
 - **`-i/--instruct <style>` — mandatory.** The run must restyle; if no image-gen
   backend can run (provider unset, CUDA/deps missing), it logs an explicit
   warning that assets were **NOT** restyled instead of silently skipping.
+  The same text is injected into the analysis as a **THEME INSTRUCTION** that
+  demands a full redesign — only the story structure and beat order survive;
+  every visual field (character looks/outfits/poses, object shapes/materials,
+  scene layouts/palettes) must be rewritten to the theme, and the theme wins
+  wherever it disagrees with the source video.
 - **`V2G_IMAGEGEN_AUTORESTYLE=1` — automatic.** No `-i` needed: the prompt is
   the design's own `style` summary of the source video. A skipped run is
   reported at NOTICE level (not silently).
+
+Every asset is redrawn from a **kind-specific brief** built in
+`v2g/godot/generator.py` (`_redraw_prompt`) — theme line + directive + subject.
+The SUBJECT (from the design, rewritten to the theme) defines what the thing
+IS; the source frame only marks what must not be copied:
+- **characters** → drawn fresh in a dynamic action pose, isolated on a plain
+  background; outfit/hairstyle/colors follow the SUBJECT while framing, stance
+  and background differ from the source frame
+- **objects** → the item cut out and centered alone as standalone item art —
+  no scenery, no characters — drawn fresh to fit the theme
+- **scenes / background** → a redesigned wide view: fresh layout, palette,
+  lighting and props, never the source frame's composition, no characters
+  painted in
 
 Providers:
 
 - **NullProvider** (default, `V2G_IMAGEGEN_PROVIDER` unset): no-op — assets are
   the raw extracted frames, zero model involvement.
 - **QwenImage21Provider** (`V2G_IMAGEGEN_PROVIDER=qwen`): in-process diffusers
-  run of Qwen-Image-2.1 — one img2img restyle per asset; the design's `visual`
-  description is passed as `reference` so subjects keep their identity.
+  run of Qwen-Image-2.1. With `V2G_IMAGEGEN_AB` (default) each asset gets
+  **two candidates** — one drawn with the source frame as visual context
+  (`condition=True`), one drawn from the brief alone (`condition=False`, pure
+  text-to-image) — and a vision-LLM judge (`_judge_redraw`) keeps the better
+  one; if the judge cannot answer, the candidate that changed the source most
+  wins. Both candidates are kept under `<run>/work/imagegen/` for comparison
+  (`<key '/'→'__'>.ref.png` / `.text.png` — e.g.
+  `characters__lady___the_bride.ref.png`), the winner is copied over the asset.
+  `V2G_IMAGEGEN_AB=0` draws only the source-referenced candidate.
 
 Setup:
 
@@ -306,6 +331,8 @@ Setup:
    allocator segments — without that every step pages over PCIe at ~100 s/step.
    Measured: **~8 min per asset at the 1024 px / 40-step defaults**, ~4.5 min
    with `V2G_IMAGEGEN_STEPS=20`; model load ~35 s on first transform.
+   With `V2G_IMAGEGEN_AB` (default) every asset is drawn twice, so the wall
+   time per asset doubles.
 
 A failing asset keeps its original frame (logged) — image generation can
 never fail a run. `V2G_IMAGEGEN_MODEL` overrides the model root (e.g. the
@@ -319,6 +346,7 @@ full bf16 repo on a big-GPU machine).
 | `V2G_IMAGEGEN_STEPS` | `40` | Denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge (aspect kept, dims ÷32) |
 | `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets without `-i` (prompt = `design.style`) |
+| `V2G_IMAGEGEN_AB` | `1` | Draw both text-only and source-referenced candidates per asset, judge picks one (`0` = reference candidate only) |
 
 To implement a new provider: subclass `ImageGenProvider` in
 `v2g/llm/image_gen.py`, implement `transform()` and `is_available()`, then

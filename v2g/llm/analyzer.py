@@ -468,7 +468,7 @@ def analysis_key(
             "system": _SYSTEM_VIDEO if detailed else _SYSTEM_FRAMES,
             "max_tokens": 16384 if detailed else 8192,
             "detailed": detailed,
-            "instruct": instruct or "",
+            "instruct": _theme_block(instruct) if instruct else "",
             "transcript": format_transcript(transcript),
             "extract": {
                 "frame_interval": settings.frame_interval,
@@ -515,19 +515,34 @@ def _transcript_note(transcript: str | None) -> str:
     )
 
 
-def _inject_instruct(user_msg: str, instruct: str | None) -> str:
-    """Append style instruction to the user message if provided."""
-    if not instruct:
-        return user_msg
+def _theme_block(instruct: str) -> str:
+    """The THEME INSTRUCTION block appended to every analysis message.
+
+    Also hashed into ``analysis_key`` so editing this template invalidates
+    run-local checkpoints produced under the old wording.
+    """
     return (
-        f"{user_msg}\n\n"
-        f"=== STYLE INSTRUCTION ===\n"
+        f"=== THEME INSTRUCTION ===\n"
         f"{instruct}\n\n"
-        f"You MUST adapt the entire design to match this style/theme while preserving "
-        f"the core structure and story beats of the source material. "
-        f"Rename characters, reskin environments, adjust tone and atmosphere accordingly.\n"
+        f"This is a FULL REDESIGN, not a light reskin — the game must no longer look "
+        f"like the source video. Keep ONLY the story structure, beat order and character "
+        f"motivations; rewrite every visual field to fit the theme above:\n"
+        f"- characters: new names, faces, outfits, hairstyles, palettes and signature "
+        f"poses/actions — no character keeps the source's look\n"
+        f"- objects: re-invented shape, material and colors\n"
+        f"- scenes: new layout, palette, lighting and atmosphere\n"
+        f"- style and atmosphere: rewritten around the theme\n"
+        f"The FAITHFULNESS RULES in the system prompt describe the SOURCE analysis only; "
+        f"wherever the theme and the source disagree, the theme wins.\n"
         f"========================="
     )
+
+
+def _inject_instruct(user_msg: str, instruct: str | None) -> str:
+    """Append the theme instruction to the user message if provided."""
+    if not instruct:
+        return user_msg
+    return f"{user_msg}\n\n{_theme_block(instruct)}"
 
 
 def analyze(

@@ -61,21 +61,25 @@ class ImageGenProvider(abc.ABC):
         image_path: Path,
         prompt: str,
         *,
-        reference: str = "",
         size: str = "",
+        condition: bool = True,
+        dest: Path | None = None,
     ) -> Path:
-        """Restyle *image_path* according to *prompt*; return the result path.
+        """Redraw *image_path* according to *prompt*; return the written path.
 
         Args:
-            image_path: Source image (PNG) — may be overwritten in place.
-            prompt: Style/content instruction (e.g. the ``--instruct`` text).
-            reference: Subject context (e.g. the character's visual
-                description from the design) to keep identity stable.
+            image_path: Source image (PNG) — read for content and aspect;
+                overwritten only when *dest* is empty.
+            prompt: Full redraw brief (theme + kind directive + subject).
             size: Explicit ``WxH`` output size; empty keeps the input aspect
                 ratio within the provider's long-side budget.
+            condition: True = feed the source image as visual context (the
+                redraw stays close to it); False = generate from *prompt* only,
+                which diverges further from the source.
+            dest: Where to write the result; empty writes in place.
 
         Returns:
-            The resulting image path (possibly the input itself).
+            The resulting image path (the input itself when *dest* is empty).
 
         Raises:
             Exception: on any generation failure — callers keep the original.
@@ -340,8 +344,8 @@ class QwenImage21Provider(ImageGenProvider):
 
     # ── prompt / size (pure helpers) ────────────────────────────────────────
 
-    def _prompt(self, prompt: str, reference: str) -> str:
-        pieces = (settings.imagegen_style.strip(), prompt.strip(), reference.strip())
+    def _prompt(self, prompt: str) -> str:
+        pieces = (settings.imagegen_style.strip(), prompt.strip())
         return ", ".join(p for p in pieces if p)
 
     def _target_size(self, src: tuple[int, int], size: str) -> tuple[int, int]:
@@ -478,21 +482,31 @@ class QwenImage21Provider(ImageGenProvider):
         image_path: Path,
         prompt: str,
         *,
-        reference: str = "",
         size: str = "",
+        condition: bool = True,
+        dest: Path | None = None,
     ) -> Path:
         from PIL import Image
 
         self._load()
 
         with Image.open(image_path) as src:
-            img = src.copy()  # detach before overwriting the file below
-        if img.mode not in ("RGB", "RGBA"):
+            src_size = src.size
+            img = src.copy() if condition else None  # detach before any overwrite
+        if img is not None and img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGB")
-        w, h = self._target_size(img.size, size)
-        full = self._prompt(prompt, reference)
-        log.info("imagegen: %s → %dx%d, %d steps: %s", image_path.name, w, h, self._steps, full)
-        if img.size != (w, h):
+        w, h = self._target_size(src_size, size)
+        full = self._prompt(prompt)
+        log.info(
+            "imagegen: %s%s → %dx%d, %d steps: %s",
+            image_path.name,
+            "" if condition else " (text-only)",
+            w,
+            h,
+            self._steps,
+            full,
+        )
+        if img is not None and img.size != (w, h):
             # Condition at the output size: at 1080x1922 the vision tokens alone
             # double the prefix KV cache for no benefit (the target canvas is w×h).
             img = img.resize((w, h))
@@ -510,8 +524,16 @@ class QwenImage21Provider(ImageGenProvider):
             num_inference_steps=self._steps,
             **kwargs,
         ).images[0]
-        out.save(image_path)
-        return image_path
+        # Write atomically: a failed save must never truncate the existing file
+        # (the caller's "keeps the original" promise depends on it).
+        out_path = dest or image_path
+        tmp = out_path.with_name(f"{out_path.stem}.tmp{out_path.suffix}")
+        try:
+            out.save(tmp)
+            os.replace(tmp, out_path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return out_path
 
 
 # ── Provider factory ────────────────────────────────────────────────────────

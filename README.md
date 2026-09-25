@@ -107,6 +107,7 @@ All settings via environment variables (or `.env` file):
 | `V2G_IMAGEGEN_STEPS` | `40` | Image-gen denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
 | `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets even without `-i` (prompt = `design.style`) |
+| `V2G_IMAGEGEN_AB` | `1` | Per asset, draw text-only and source-referenced candidates and keep the judge's pick (`0` = reference only) |
 
 ## Development
 
