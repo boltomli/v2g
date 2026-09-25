@@ -304,15 +304,17 @@ Providers:
 - **NullProvider** (default, `V2G_IMAGEGEN_PROVIDER` unset): no-op — assets are
   the raw extracted frames, zero model involvement.
 - **QwenImage21Provider** (`V2G_IMAGEGEN_PROVIDER=qwen`): in-process diffusers
-  run of Qwen-Image-2.1. With `V2G_IMAGEGEN_AB` (default) each asset gets
+  run of Qwen-Image-2.1. With `V2G_IMAGEGEN_AB` (off by default) each asset gets
   **two candidates** — one drawn with the source frame as visual context
   (`condition=True`), one drawn from the brief alone (`condition=False`, pure
   text-to-image) — and a vision-LLM judge (`_judge_redraw`) keeps the better
   one; if the judge cannot answer, the candidate that changed the source most
   wins. Both candidates are kept under `<run>/work/imagegen/` for comparison
   (`<key '/'→'__'>.ref.png` / `.text.png` — e.g.
-  `characters__lady___the_bride.ref.png`), the winner is copied over the asset.
-  `V2G_IMAGEGEN_AB=0` draws only the source-referenced candidate.
+  `characters__lady___the_bride.ref.png`); the winner is copied to a sibling
+  `<frame>.redraw.png` and the asset key points at it, so the extracted frame
+  itself is never overwritten. Without `V2G_IMAGEGEN_AB` only the
+  source-referenced candidate is drawn.
 
 Setup:
 
@@ -329,13 +331,15 @@ Setup:
    offload with the GGUF denoiser kept resident. On a 6 GB RTX 4050 laptop
    the low-VRAM path also disables the prefix KV cache (~2 GB) and expands
    allocator segments — without that every step pages over PCIe at ~100 s/step.
-   Measured: **~8 min per asset at the 1024 px / 40-step defaults**, ~4.5 min
-   with `V2G_IMAGEGEN_STEPS=20`; model load ~35 s on first transform.
-   With `V2G_IMAGEGEN_AB` (default) every asset is drawn twice, so the wall
+   Measured: **~8 min per asset at the 1024 px / 40-step settings**, ~4.5 min
+   with `V2G_IMAGEGEN_STEPS=20` (the default); model load ~35 s on first
+   transform. With `V2G_IMAGEGEN_AB` every asset is drawn twice, so the wall
    time per asset doubles.
 
 A failing asset keeps its original frame (logged) — image generation can
-never fail a run. `V2G_IMAGEGEN_MODEL` overrides the model root (e.g. the
+never fail a run. A load that fails is remembered for the rest of the run:
+later assets keep their frames instead of reloading the ~22 GB bundle for
+every candidate. `V2G_IMAGEGEN_MODEL` overrides the model root (e.g. the
 full bf16 repo on a big-GPU machine).
 
 | Variable | Default | Description |
@@ -343,10 +347,10 @@ full bf16 repo on a big-GPU machine).
 | `V2G_IMAGEGEN_PROVIDER` | — | `qwen` = local Qwen-Image-2.1; unset = off |
 | `V2G_IMAGEGEN_MODEL` | — | Model root override (diffusers dir / HF id) |
 | `V2G_IMAGEGEN_STYLE` | — | Global style prefix prepended to all prompts |
-| `V2G_IMAGEGEN_STEPS` | `40` | Denoising steps |
+| `V2G_IMAGEGEN_STEPS` | `20` | Denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge (aspect kept, dims ÷32) |
 | `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets without `-i` (prompt = `design.style`) |
-| `V2G_IMAGEGEN_AB` | `1` | Draw both text-only and source-referenced candidates per asset, judge picks one (`0` = reference candidate only) |
+| `V2G_IMAGEGEN_AB` | — | Off: one source-referenced candidate per asset. `1` = also draw a text-only candidate and let the judge pick |
 
 To implement a new provider: subclass `ImageGenProvider` in
 `v2g/llm/image_gen.py`, implement `transform()` and `is_available()`, then

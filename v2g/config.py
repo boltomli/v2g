@@ -36,10 +36,10 @@ class Settings(BaseSettings):
         ""  # model root override (diffusers dir / HF id); "" = managed GGUF bundle
     )
     imagegen_style: str = ""  # global style prefix for all image gen prompts
-    imagegen_steps: int = 40  # denoising steps (Qwen's default)
+    imagegen_steps: int = 20  # denoising steps (Qwen's default is 40 — time scales with it)
     imagegen_max_side: int = 1024  # longest output edge — lower to save RAM/VRAM
     imagegen_autorestyle: bool = False  # redraw assets even without -i; prompt = design.style
-    imagegen_ab: bool = True  # draw text-only AND reference candidates per asset, judge picks one
+    imagegen_ab: bool = False  # draw text-only AND reference candidates per asset, judge picks one
 
     # Output
     output_root: Path = Path("projects")

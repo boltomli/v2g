@@ -104,9 +104,14 @@ class _Chat:
 
 @pytest.fixture(autouse=True)
 def judge(monkeypatch) -> _Chat:
-    """No real LLM in tests: default verdict is unusable → difference fallback."""
+    """No real LLM in tests: default verdict is unusable → difference fallback.
+
+    A/B is switched on here so the two-candidate behaviour is what the tests
+    exercise; a test that wants a single candidate sets ``imagegen_ab`` itself.
+    """
     stub = _Chat()
     monkeypatch.setattr(G, "chat", stub)
+    monkeypatch.setattr(G.settings, "imagegen_ab", True)
     return stub
 
 
@@ -159,7 +164,9 @@ def test_judge_pick_keeps_that_candidate(monkeypatch, tmp_path, judge, pick, col
 
     assert _color(assets["characters/lady___the_bride"]) == color
     assert _color(assets["background"]) == color
-    assert assets["background"] is bg  # winner is written over the asset path, never relocated
+    assert assets["background"] != bg  # the winner lands in a sibling redraw file
+    assert assets["background"].name == "background.redraw.png"
+    assert _color(bg) == BLUE  # the extracted frame itself is never written to
     assert len(judge.calls[0]) == 4  # brief + source frame + both candidates
 
 
@@ -205,7 +212,7 @@ def test_one_surviving_candidate_wins_without_the_judge(monkeypatch, tmp_path, j
     assert "kept their original frames" not in caplog.text
 
 
-def test_ab_off_draws_one_reference_candidate_in_place(monkeypatch, tmp_path, judge):
+def test_ab_off_draws_one_reference_candidate_beside_the_frame(monkeypatch, tmp_path, judge):
     provider = _Recording()
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
     monkeypatch.setattr(G.settings, "imagegen_ab", False)
@@ -220,11 +227,15 @@ def test_ab_off_draws_one_reference_candidate_in_place(monkeypatch, tmp_path, ju
     ]
     assert judge.calls == []  # nothing to compare
     assert _color(assets["background"]) == NAVY
+    assert _color(tmp_path / "background.png") == BLUE  # the frame is left alone
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "background.png",
+        "background.redraw.png",
         "char_lady___the_bride.png",
+        "char_lady___the_bride.redraw.png",
         "obj_signet_ring.png",
-    ]  # no candidate files next to the assets
+        "obj_signet_ring.redraw.png",
+    ]  # one redraw beside each frame — no candidates staged
 
 
 def test_both_candidates_are_kept_for_comparison(monkeypatch, tmp_path, judge):

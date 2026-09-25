@@ -27,7 +27,9 @@ Prepare the bundle ahead of a run::
     .venv/Scripts/python -c "from v2g.llm.image_gen import prepare_model; prepare_model()"
 
 Failures raise; :func:`v2g.godot.generator._restyle_assets` keeps the original
-frame and logs, so image generation can never fail a run.
+frame and logs, so image generation can never fail a run. A load that fails is
+remembered for the rest of the run — later assets keep their frames instead of
+reloading the ~22 GB bundle for every candidate.
 """
 
 from __future__ import annotations
@@ -319,6 +321,7 @@ class QwenImage21Provider(ImageGenProvider):
         self._steps = steps if steps is not None else settings.imagegen_steps
         self._max_side = max_side if max_side is not None else settings.imagegen_max_side
         self._pipe = None  # lazy — loading costs tens of seconds and ~22 GB RAM
+        self._load_error: str | None = None  # a load that failed is never retried
 
     # ── availability ────────────────────────────────────────────────────────
 
@@ -367,6 +370,20 @@ class QwenImage21Provider(ImageGenProvider):
     def _load(self) -> None:
         if self._pipe is not None:
             return
+        if self._load_error is not None:
+            # A load that failed poisoned this run: the CUDA context that could not
+            # be created does not come back in the same process, so reloading the
+            # ~22 GB bundle per candidate would burn minutes to fail again. Every
+            # later asset keeps its original frame instead.
+            raise RuntimeError(f"imagegen model load already failed: {self._load_error}")
+        try:
+            self._pipe = self._build_pipe()
+        except Exception as e:  # the caller drops this candidate out and logs
+            self._load_error = f"{type(e).__name__}: {e}"
+            raise
+
+    def _build_pipe(self):
+        """Load the bundle from disk and place it — the expensive half of ``_load``."""
         err = self._import_error()
         if err:
             raise RuntimeError(
@@ -379,6 +396,14 @@ class QwenImage21Provider(ImageGenProvider):
             QwenImage21Transformer2DModel,
         )
         from transformers import Qwen3VLForConditionalGeneration
+
+        if torch.cuda.is_available():
+            # The driver's first primary-context allocation is the call that has
+            # failed (CUDA_ERROR_OUT_OF_MEMORY from cuDevicePrimaryCtxRetain) when
+            # it runs at the end of this method, with ~22 GB of weights already
+            # resident and no free RAM left to back it. Ask for it now, while the
+            # machine still has room; every later allocation reuses it.
+            torch.zeros(1, device="cuda")
 
         root = prepare_model()
         dtype = torch.bfloat16
@@ -404,7 +429,7 @@ class QwenImage21Provider(ImageGenProvider):
             # let diffusers load the whole pipeline as-is.
             log.info("imagegen: loading Qwen-Image-2.1 from %s", root)
             pipe = QwenImage21Pipeline.from_pretrained(str(root), dtype=dtype)
-        self._pipe = self._place(pipe, gguf=gguf.is_file())
+        return self._place(pipe, gguf=gguf.is_file())
 
     @staticmethod
     def _plain_non_linear_weights(transformer) -> None:

@@ -346,7 +346,8 @@ def _candidates_dir(enabled: bool) -> Iterator[Path | None]:
 
     Inside a run they land in ``<run>/work/imagegen/`` (kept for comparison);
     outside a run they go to a scratch directory removed on exit. Never raises:
-    when staging fails, the caller falls back to one in-place candidate.
+    when staging fails, the caller falls back to a single candidate written
+    beside the frame.
     """
     from v2g import runlog
 
@@ -360,7 +361,9 @@ def _candidates_dir(enabled: bool) -> Iterator[Path | None]:
             kept.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             log.warning(
-                "imagegen: cannot stage A/B candidates (%s) — drawing one candidate in place", e
+                "imagegen: cannot stage A/B candidates (%s) — drawing one candidate beside "
+                "the frame",
+                e,
             )
             yield None
             return
@@ -370,7 +373,7 @@ def _candidates_dir(enabled: bool) -> Iterator[Path | None]:
         scratch = Path(tempfile.mkdtemp(prefix="v2g-imagegen-"))
     except OSError as e:
         log.warning(
-            "imagegen: cannot stage A/B candidates (%s) — drawing one candidate in place", e
+            "imagegen: cannot stage A/B candidates (%s) — drawing one candidate beside the frame", e
         )
         yield None
         return
@@ -390,12 +393,17 @@ def _replace(src: Path, dst: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _redraw_path(path: Path) -> Path:
+    """Where a redrawn asset lands: beside the frame, never on top of it."""
+    return path.with_name(f"{path.stem}.redraw{path.suffix}")
+
+
 def _restyle_assets(
     design: GameDesign,
     assets: dict[str, Path],
     instruct: str | None,
 ) -> None:
-    """Re-draw each extracted asset in a target style, in place.
+    """Re-draw each extracted asset in a target style, beside the original.
 
     Trigger: an explicit ``-i/--instruct`` (mandatory — a request that cannot
     run is reported, never silently dropped) or ``V2G_IMAGEGEN_AUTORESTYLE``
@@ -403,12 +411,14 @@ def _restyle_assets(
     Without a style request the raw frames are the correct output.
 
     Every asset is redrawn from a kind-specific brief (new look/clothes/pose for
-    characters, the object alone, a redesigned scene). With ``V2G_IMAGEGEN_AB``
-    each asset gets two candidates — one drawn with the source frame as visual
-    context, one from the brief alone — and a vision judge keeps the better;
-    both are staged under ``<run>/work/imagegen/`` during a run (a scratch
-    directory otherwise) for comparison. One failing asset keeps its original
-    frame — image generation can never fail a run.
+    characters, the object alone, a redesigned scene). The result is written to
+    a sibling ``*.redraw.png`` and the asset key is repointed at it, so the
+    extracted frame survives for comparison and for a redo. With
+    ``V2G_IMAGEGEN_AB`` each asset gets two candidates — one drawn with the
+    source frame as visual context, one from the brief alone — and a vision
+    judge keeps the better; both are staged under ``<run>/work/imagegen/``
+    during a run (a scratch directory otherwise) for comparison. One failing
+    asset keeps its original frame — image generation can never fail a run.
     """
     if not assets:
         return
@@ -453,9 +463,10 @@ def _restyle_assets(
         modes = (("ref", True), ("text", False)) if cand_dir else (("ref", True),)
         for key, path in list(assets.items()):
             brief = _redraw_prompt(design, key, style)
+            redraw = _redraw_path(path)  # the extracted frame is never written to
             made: dict[str, Path] = {}
             for name, condition in modes:
-                dest = cand_dir / f"{key.replace('/', '__')}.{name}.png" if cand_dir else None
+                dest = cand_dir / f"{key.replace('/', '__')}.{name}.png" if cand_dir else redraw
                 try:
                     made[name] = provider.transform(path, brief, condition=condition, dest=dest)
                 except Exception as e:  # noqa: BLE001 — a failed candidate just drops out
@@ -484,13 +495,16 @@ def _restyle_assets(
                             e,
                             pick,
                         )
-            if made[pick] != path:
+            out = made[pick]
+            if out != redraw:
                 try:
-                    _replace(made[pick], path)  # atomic: the original survives a failed copy
+                    _replace(out, redraw)  # atomic: a failed copy leaves the frame intact
                 except Exception as e:  # noqa: BLE001 — any failure keeps the run's original frame
                     failures += 1
                     log.warning("Image generation failed for %s — keeping original: %s", key, e)
                     continue
+                out = redraw
+            assets[key] = out  # the game reads the redraw; the frame stays on disk
             staged = cand_dir if runlog.run_dir() is not None and len(made) == 2 else ""
             log.info(
                 "imagegen: %s ← %s redraw%s",

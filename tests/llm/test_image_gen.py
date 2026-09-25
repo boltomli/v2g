@@ -52,6 +52,24 @@ def test_qwen_availability_tracks_optional_dependencies(monkeypatch):
     assert provider.is_available() is True
 
 
+def test_failed_model_load_is_not_retried(monkeypatch):
+    """A load that failed is remembered — later candidates must not reload ~22 GB."""
+    provider = QwenImage21Provider()
+    attempts: list[int] = []
+
+    def boom() -> None:
+        attempts.append(1)
+        raise RuntimeError("CUDA error: out of memory")
+
+    monkeypatch.setattr(provider, "_build_pipe", boom)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        provider._load()
+    with pytest.raises(RuntimeError, match="already failed: RuntimeError: CUDA error") as second:
+        provider._load()
+    assert attempts == [1]  # the bundle was built once, not once per candidate
+    assert "out of memory" in str(second.value)  # the original cause stays visible
+
+
 def test_prompt_prepends_the_global_style_prefix(monkeypatch):
     monkeypatch.setattr(settings, "imagegen_style", "oil painting")
     provider = QwenImage21Provider()
