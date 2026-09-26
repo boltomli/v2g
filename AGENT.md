@@ -147,7 +147,14 @@ enforced in the analyzer prompts and the generator:
   subtitles (sidecar `.srt`/`.vtt`/`.ass` — bare or language-tagged like
   `.en.srt`, which is what yt-dlp writes — or the embedded subtitle stream) and
   injects the transcript into every analysis mode; LLM prompts mark it
-  authoritative and require `line` to stay EMPTY when no transcript exists.
+  authoritative for `line` and require `line` to stay EMPTY when no transcript
+  exists.
+- **The transcript is dialogue, never a cast list.** `characters` holds only
+  people who appear on screen — a name in the subtitles who is never shown is
+  not a character (they may still be a `speaker`), and one visible face stays
+  one entry with every alias in `name`. Enforced by the shared
+  `CHARACTER GROUNDING` block in both stage-1 system prompts and by the
+  transcript header.
 - Choice options are player-authored UI text: Chinese-only, unless the exact
   wording appears in the transcript.
 - `dialogue_samples` **is the full playable script in order** — the generator
@@ -177,7 +184,7 @@ class GameDesign:
 
 
 class Character:
-    name: str
+    name: str  # one on-screen person; aliases joined by " / " (never an unseen mention)
     face_id: str  # stable identity anchor (e.g. "char_01"), survives costume changes
     role: str  # protagonist / antagonist / NPC / companion / boss / minion
     visual: str  # PRIMARY appearance: face, body, hair, build (never changes)
@@ -372,9 +379,12 @@ Stage 2 has two halves and both run **after** stage 1, whatever the theme:
    extracted — never a silent skip.
 
 The redraw is driven by a **kind-specific brief** built in
-`v2g/godot/generator.py` (`_redraw_prompt`) — theme line + directive + subject.
-The SUBJECT (the stage-2 design) defines what the thing IS; the source frame
-only marks what must not be copied:
+`v2g/godot/generator.py` (`_redraw_prompt`) — opening theme line, the stage-2
+design's `style` as `ART STYLE:`, the kind directive, the subject, and a
+closing `THEME MANDATE:` that restates the theme (the reference candidate is
+fed the source frame as visual context, so a theme named only once at the top
+loses to the video's own palette). The SUBJECT (the stage-2 design) defines
+what the thing IS; the source frame only marks what must not be copied:
 - **characters** → drawn fresh as a square half-body portrait (head and torso),
   isolated on a plain background; outfit/hairstyle/colors follow the SUBJECT
   while framing, stance and background differ from the source frame

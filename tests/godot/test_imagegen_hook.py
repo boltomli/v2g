@@ -156,6 +156,24 @@ def test_restyle_draws_both_candidates_with_kind_specific_briefs(monkeypatch, tm
     assert "Courtyard: moonlit stone courtyard" in bg
 
 
+def test_the_theme_bookends_the_brief_and_the_design_style_rides_along(monkeypatch, tmp_path):
+    """A theme named once at the top loses to the source frame fed in as
+    visual context — the brief restates it as a closing mandate and carries
+    the stage-2 design's own art style too."""
+    provider = _Recording()
+    monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
+    design = _design()
+    design.style = "gothic pixel art, moonlit blues"
+
+    G.restyle_assets(design, _assets(tmp_path), "vampire style")
+
+    for _, prompt, _ in provider.calls:
+        assert "ART STYLE: gothic pixel art, moonlit blues" in prompt
+        mandate = prompt.split("\n\n")[-1]
+        assert mandate.startswith("THEME MANDATE: vampire style")
+        assert "the theme wins" in mandate
+
+
 @pytest.mark.parametrize(("pick", "color"), [("ref", NAVY), ("text", GREEN)])
 def test_judge_pick_keeps_that_candidate(monkeypatch, tmp_path, judge, pick, color):
     provider = _Recording()

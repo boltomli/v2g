@@ -9,7 +9,8 @@ back into an earlier one:
 
 ```
 Video (file/URL)
-    │  Subtitles → transcript (source-language dialogue, authoritative)
+    │  Subtitles → transcript (source-language dialogue, authoritative;
+    │               names in it are NOT characters unless shown)
     ▼
 Stage 1 · analyze the ORIGINAL video + extract its assets
     Fast mode: ffmpeg keyframes ─┐   faithful GameDesign (characters, story,
@@ -50,7 +51,9 @@ Two analysis modes (both part of stage 1):
 2. **Rewrite + redraw** — re-skins the design's presentation with the theme you
    passed (`-i`) or, with none, simply so it no longer looks like the source;
    names, ids and dialogue stay fixed. The assets are then redrawn beside their
-   frames when an image-gen backend is configured (skip is always reported).
+   frames when an image-gen backend is configured (skip is always reported);
+   each brief opens and closes with the theme and carries the re-skinned
+   design's art style, so the redraw follows `-i` instead of the source frame.
 3. **Generate** — scaffolds a visual-novel Godot 4.x project (`project.godot`,
    `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`),
    compile-checks every script (one LLM repair pass, then fallback, on parse

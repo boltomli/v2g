@@ -47,7 +47,7 @@ _JSON_SCHEMA = """\
 
   "characters": [
     {
-      "name": "string — character name or identifier",
+      "name": "string — character name or identifier (ONLY someone actually visible on screen; a name merely mentioned in the transcript is not a character — list every alias of one visible person here, separated by ' / ')",
       "face_id": "string — identity anchor: a stable ID like 'char_01' that stays the same even when the name or costume changes across scenes",
       "role": "string — protagonist / antagonist / NPC / companion / boss / minion / merchant / narrator",
       "visual": "string — PRIMARY appearance (most common outfit): body shape, face, hair, build, distinguishing features",
@@ -98,7 +98,7 @@ _JSON_SCHEMA = """\
 
   "dialogue_samples": [
     {
-      "speaker": "string — character name (empty for narration entries)",
+      "speaker": "string — speaker name; may be an off-screen voice with NO character entry (empty for narration entries)",
       "line": "string — VERBATIM source-language line copied from the transcript (or dialogue you can actually perceive); EMPTY for narration",
       "line_zh": "string — REQUIRED. Simplified Chinese: translation of `line` for dialogue, original Chinese narration otherwise",
       "context": "string — when/why this line is said",
@@ -144,6 +144,20 @@ GAME FORM (hard requirements):
   choice-driven narrative beats, not platformer levels to traverse.
 """
 
+_CAST_RULES = """\
+CHARACTER GROUNDING (the pictures decide who exists, not the transcript):
+- `characters` holds ONLY people who APPEAR ON SCREEN in the frames/video. The
+  transcript is dialogue text, not a cast list: someone who is mentioned,
+  asked after, or spoken of but never shown is NOT a character — no entry, and
+  never an invented `visual` for them, however important to the story.
+- One visible person = ONE entry however many names or titles the dialogue
+  uses for them: put every alias in `name` (e.g. "John / The Stranger") instead
+  of fanning one face out into several characters.
+- Speakers are not automatically characters: an off-screen voice, a narrator or
+  a mentioned party may be a `dialogue_samples.speaker` with no portrait of
+  their own.
+"""
+
 # ── System prompts ──────────────────────────────────────────────────────────
 
 _SYSTEM_FRAMES = f"""\
@@ -182,6 +196,7 @@ CHARACTER IDENTITY RULES:
 If you cannot tell whether two people are the same, use face_id to mark them as
 "possibly same" — the merge system will reconcile.
 
+{_CAST_RULES}
 {_LANGUAGE_RULES}
 {_VN_RULES}
 {_JSON_SCHEMA}
@@ -236,6 +251,7 @@ CHARACTER IDENTITY RULES:
 - Same character referred to by different names in different scenes → merge under one entry,
   note all names in the "name" field (e.g. "John / The Stranger").
 
+{_CAST_RULES}
 {_LANGUAGE_RULES}
 {_VN_RULES}
 {_JSON_SCHEMA}
@@ -505,7 +521,8 @@ def _transcript_note(transcript: str | None) -> str:
     if transcript:
         return (
             "\n=== TRANSCRIPT EXTRACTED FROM THE SOURCE VIDEO "
-            "(authoritative for every `line`) ===\n"
+            "(authoritative for every `line` — DIALOGUE ONLY, not a cast list: "
+            "being named here does not make someone a character) ===\n"
             f"{transcript}\n=== END TRANSCRIPT ===\n"
         )
     return (

@@ -286,12 +286,27 @@ def _asset_subject(design: GameDesign, key: str) -> str:
 
 
 def _redraw_prompt(design: GameDesign, key: str, style: str) -> str:
-    """Full redraw brief for one asset: theme, kind directive, subject."""
+    """Full redraw brief for one asset: theme, art style, kind directive, subject.
+
+    The theme is stated twice — opening line and closing mandate — and the
+    design's stage-2 ``style`` rides along: the reference candidate is fed the
+    source frame as visual context, so a theme mentioned only once at the top
+    loses to the video's own palette.
+    """
     kind = key.partition("/")[0]
-    blocks = [f"Redraw in this theme: {style}", _DIRECTIVES.get(kind, _DIRECTIVES["scenes"])]
+    blocks = [f"Redraw in this theme: {style}"]
+    if design.style.strip():
+        blocks.append(f"ART STYLE: {design.style}")
+    blocks.append(_DIRECTIVES.get(kind, _DIRECTIVES["scenes"]))
     subject = _asset_subject(design, key)
     if subject:
         blocks.append(f"SUBJECT: {subject}")
+    blocks.append(
+        f"THEME MANDATE: {style}. Every color, material, garment, hairstyle, prop "
+        f"and lighting choice must belong to this theme — where the source frame "
+        f"disagrees with the theme, the theme wins; do not reproduce the source "
+        f"frame's palette or costumes."
+    )
     return "\n\n".join(blocks)
 
 
