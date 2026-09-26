@@ -620,10 +620,10 @@ def asset_key_renames(before: GameDesign, after: GameDesign) -> dict[str, str]:
 
 
 def _theme_block(instruct: str) -> str:
-    """The THEME INSTRUCTION block appended to every analysis message.
+    """The THEME INSTRUCTION block appended to the stage-2 re-skin message.
 
-    Also hashed into ``analysis_key`` so editing this template invalidates
-    run-local checkpoints produced under the old wording.
+    Stage 1 is deliberately theme-free (``analysis_key`` excludes this
+    template), so every themed variant of one video reuses its checkpoint.
     """
     return (
         f"=== THEME INSTRUCTION ===\n"
