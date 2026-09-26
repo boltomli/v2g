@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+
+from v2g.config import settings
 from v2g.godot import templates as T
 from v2g.llm import analyzer
 from v2g.llm.analyzer import (
@@ -14,6 +17,7 @@ from v2g.llm.analyzer import (
     asset_key_renames,
     rewrite_design,
 )
+from v2g.llm.errors import LLMOutputError
 
 
 def _design() -> GameDesign:
@@ -33,14 +37,22 @@ def _design() -> GameDesign:
 
 def _capture_rewrite(monkeypatch, rewritten):
     """Run rewrite_design against a stub and return the prompt it was given."""
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
-    def fake(system: str, parts, **_kwargs):
+    def fake(system: str, parts, **kwargs):
         seen["prompt"] = parts[0]
+        seen["kwargs"] = kwargs
         return rewritten
 
     monkeypatch.setattr(analyzer, "_request_design", fake)
     return seen
+
+
+def _boom(exc: Exception):
+    def raiser(*_args, **_kwargs):
+        raise exc
+
+    return raiser
 
 
 def test_a_theme_forces_a_full_redesign_including_names(monkeypatch):
@@ -65,6 +77,19 @@ def test_without_a_theme_the_design_still_differs_from_the_source(monkeypatch):
 
     assert "No theme was given" in seen["prompt"]
     assert "does not look like the source video" in seen["prompt"]
+
+
+def test_the_rewrite_drops_baked_in_text_from_the_design(monkeypatch):
+    """Stage 1 faithfully reports the source's burned-in subtitles and
+    watermark — the re-skin must not carry them into the art direction, or the
+    redraw briefs would ask the image model to paint text."""
+    seen = _capture_rewrite(monkeypatch, _design())
+
+    rewrite_design(_design(), "vampire theme")
+
+    assert "DROP — all baked-in text" in seen["prompt"]
+    assert "the concept itself" in seen["prompt"]  # not just the source's spelling
+    assert "describe the surface, not its lettering" in seen["prompt"]
 
 
 def test_renames_are_applied_and_the_speaker_follows(monkeypatch):
@@ -151,8 +176,8 @@ def test_duplicate_new_names_are_rejected(monkeypatch):
     ]
     _capture_rewrite(monkeypatch, collided)
 
-    kept = rewrite_design(src, "vampire theme")
-    assert [c.name for c in kept.characters] == ["Hero", "Maid"]
+    with pytest.raises(LLMOutputError, match="duplicate character name"):
+        rewrite_design(src, "vampire theme")
 
 
 def test_scene_transitions_follow_renamed_scenes(monkeypatch):
@@ -177,8 +202,8 @@ def test_a_rewrite_that_drops_an_identity_is_rejected(monkeypatch):
     shrunken.scenes = []
     _capture_rewrite(monkeypatch, shrunken)
 
-    kept = rewrite_design(_design(), "vampire theme")
-    assert [s.name for s in kept.scenes] == ["教室"]
+    with pytest.raises(LLMOutputError, match="reshaped the scene list"):
+        rewrite_design(_design(), "vampire theme")
 
 
 def test_dialogue_is_restored_from_the_source_design(monkeypatch):
@@ -192,11 +217,32 @@ def test_dialogue_is_restored_from_the_source_design(monkeypatch):
     )
 
 
-def test_a_failed_rewrite_keeps_the_faithful_design(monkeypatch):
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("no api key")
+def test_a_failed_rewrite_stops_the_run(monkeypatch):
+    """A re-skin that never arrived must not carry on: the redraw stage would
+    burn image generation (and stage 3) on a source-faithful design."""
+    monkeypatch.setattr(
+        analyzer, "_request_design", _boom(LLMOutputError("truncated at max_tokens"))
+    )
 
-    monkeypatch.setattr(analyzer, "_request_design", boom)
-    faithful = _design()
+    with pytest.raises(LLMOutputError, match="stopping before the redraw stage"):
+        rewrite_design(_design(), "vampire theme")
 
-    assert rewrite_design(faithful, "vampire theme") is faithful
+
+def test_a_transport_failure_also_stops_the_run(monkeypatch):
+    """The old code caught every exception and continued — an outage during
+    the re-skin is a stop too, same as anywhere else in the pipeline."""
+    monkeypatch.setattr(analyzer, "_request_design", _boom(RuntimeError("no api key")))
+
+    with pytest.raises(RuntimeError, match="no api key"):
+        rewrite_design(_design(), "vampire theme")
+
+
+def test_the_rewrite_budget_is_the_configured_ceiling(monkeypatch):
+    """Regression: a fixed 16384 let the reasoning model think the whole cap
+    away (finish=length, empty body) — the re-skin parse failed with an empty
+    response and the run shipped the source design."""
+    seen = _capture_rewrite(monkeypatch, _design())
+
+    rewrite_design(_design(), "vampire theme")
+
+    assert seen["kwargs"]["max_tokens"] == settings.llm_max_tokens

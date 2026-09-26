@@ -13,7 +13,8 @@ project, in **three stages that only ever flow forwards**:
    presentation is re-skinned (with no theme it only has to differ from the
    source video): names and backgrounds are re-invented too, with asset keys
    and dialogue speakers re-keyed so the extracted frames keep resolving. The
-   assets are redrawn beside their frames.
+   assets are redrawn beside their frames. If the re-skin fails the run stops
+   here — a source-faithful design is never redrawn or shipped.
 3. **Generate the game flow and copy** — the Godot project: script flow,
    dialogue, choices, HUD. Voice-over and background music are **planned but
    not implemented yet**.
@@ -367,16 +368,22 @@ Stage 2 has two halves and both run **after** stage 1, whatever the theme:
    is rewritten to the theme, and the theme wins wherever it disagrees with
    the source video. **Without a theme** the same rewrite runs on a weaker
    brief — keep the world recognisable, but the result must not look like the
-   source video. Renames are the contract, not an accident: the result is
+   source video. The source's **burned-in text** (subtitles/captions,
+   watermark, on-screen titles) is dropped in this same call — stage 1
+   reported it faithfully, the re-skin must not carry it into the art
+   direction. Renames are the contract, not an accident: the result is
    normalised against the source design after the call — each entity list put
    back into source order (`face_id` anchors characters, position settles the
    rest), dialogue speakers re-pointed at the new names so speaker→portrait
    keeps its target, scene transitions re-keyed, `dialogue_samples` lines
    restored from the transcript — and the pipeline applies
    `asset_key_renames()` so stage 1's extracted sprites keep resolving under
-   the new names. A structurally different re-skin (dropped, added or
-   duplicated identity) and a failed rewrite both ship the faithful design
-   instead — it can never fail a run.
+   the new names. The call runs at `V2G_LLM_MAX_TOKENS` — its answer is the
+   whole design document again, so a smaller fixed cap (16384) let a reasoning
+   model think the budget away and answer with an empty body. A failed rewrite,
+   or one that reshapes an entity list or duplicates a name, raises
+   `LLMOutputError`: the run stops **before** `restyle_assets`, never feeding a
+   source-faithful design to the image generation and stage 3.
 2. **`restyle_assets(design, assets, instruct)`** (`v2g/godot/generator.py`)
    — the image half: each extracted asset is re-drawn in that style by a
    **local Qwen-Image-2.1** model instead of shipping the raw video frame.
@@ -388,17 +395,26 @@ Stage 2 has two halves and both run **after** stage 1, whatever the theme:
 
 The redraw is driven by a **kind-specific brief** built in
 `v2g/godot/generator.py` (`_redraw_prompt`) — opening theme line, the stage-2
-design's `style` as `ART STYLE:`, the kind directive, the subject, and a
-closing `THEME MANDATE:` that restates the theme (the reference candidate is
+design's `style` as `ART STYLE:`, the kind directive, the subject, a closing
+`THEME MANDATE:` that restates the theme (the reference candidate is
 fed the source frame as visual context, so a theme named only once at the top
-loses to the video's own palette). The SUBJECT (the stage-2 design) defines
-what the thing IS; the source frame only marks what must not be copied.
+loses to the video's own palette), and a closing `NO BURNED-IN TEXT:` rule:
+the extracted frames carry the source's subtitles and watermark, so neither
+the brief nor the reference may put text into the drawing (the game renders
+its own text; in-world signage only when the subject asks for it). Measured:
+with the faithful style still naming the source's chalk text and watermark,
+the model painted them regardless of the rule — the brief rules only hold
+once the rewrite has cleaned `ART STYLE`, which is why the DROP directive
+lives there. The SUBJECT (the stage-2 design) defines what the thing IS;
+the source frame only marks what must not be copied.
 The **reference candidate's** brief is text-led on top of that
 (`_reference_prompt`): the source frame is first captioned into a sentence by
-a vision call (`_frame_caption` — an outage just drops the sentence) and the
+a vision call (`_frame_caption` — told to ignore burned-in text, so a
+subtitle never reaches the prompt; an outage just drops the sentence) and the
 closing note binds every line of the brief while demoting the attached frame
-to "reference only, never a template", so the pixels can't out-shout the
-text (i2t2i: image → text → image, image as reference):
+to "reference only, never a template" — and forbids reproducing the text it
+carries — so the pixels can't out-shout the text (i2t2i: image → text →
+image, image as reference):
 - **characters** → drawn fresh as a square half-body portrait (head and torso),
   isolated on a plain background; outfit/hairstyle/colors follow the SUBJECT
   while framing, stance and background differ from the source frame
@@ -407,6 +423,11 @@ text (i2t2i: image → text → image, image as reference):
 - **scenes / background** → a redesigned wide view: fresh layout, palette,
   lighting and props, never the source frame's composition, no characters
   painted in
+
+The frame caption and the A/B judge are one-sentence answers, but both run at
+`_VISION_TOKENS` (6000): a reasoning model spends the cap thinking before it
+answers, and at `max_tokens=200` both came back empty (`finish=length`) for
+an entire restyle.
 
 Providers:
 

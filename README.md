@@ -53,11 +53,15 @@ Two analysis modes (both part of stage 1):
    characters, objects and scenes get new names and every background is a
    different place, while `face_id`, gameplay and the verbatim dialogue stay
    fixed — extracted sprites follow the renames (asset keys and speaker labels
-   are re-keyed). The assets are then redrawn beside their
-   frames when an image-gen backend is configured (skip is always reported);
-   each brief opens and closes with the theme and carries the re-skinned
-   design's art style, so the redraw follows `-i` instead of the source frame —
-   and the source-referenced candidate is text-led: the frame enters as a
+   are re-keyed). If the re-skin fails, the run stops here instead of redrawing
+   the art and generating a source-faithful game. The assets are then redrawn
+   beside their frames when an image-gen backend is configured (skip is always
+   reported); each brief opens and closes with the theme and carries the
+   re-skinned design's art style, so the redraw follows `-i` instead of the
+   source frame — and the text the source burned in (subtitles, watermark) is
+   ruled out at every step: the re-skin drops it from the design, the frame
+   caption ignores it, every brief forbids it — redrawn art ships without
+   text. The source-referenced candidate is text-led: the frame enters as a
    caption and stays a reference, never a template.
 3. **Generate** — scaffolds a visual-novel Godot 4.x project (`project.godot`,
    `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`),

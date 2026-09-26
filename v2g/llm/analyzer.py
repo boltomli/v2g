@@ -673,8 +673,9 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
     source video — only their speaker labels move.
 
     A structurally different re-skin (a dropped, added or duplicated identity)
-    and a failed call both return the design unchanged: it can never fail a
-    run.
+    and a failed call raise :class:`LLMOutputError`, which stops the pipeline
+    before the redraw stage: shipping a source-faithful design would waste the
+    image generation (and stage 3) on a result the user did not ask for.
     """
     user = (
         "Re-skin this GameDesign for the style below.\n"
@@ -684,17 +685,32 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
         "style, redesign every scene/background as a different place, and keep each "
         "list the same length in the same order (one renamed entity per source "
         "entity).\n"
+        "DROP — all baked-in text, in ANY terms: subtitles/captions (even a "
+        "styled or 'rendered at runtime' subtitle look), watermarks, logos, "
+        "on-screen titles, credits, and hand-written or printed lettering on "
+        "walls, boards or props — not the source's spelling of them, the "
+        "concept itself. No visual field may ask for text inside the picture: "
+        "describe the surface, not its lettering. The game renders every word "
+        "at runtime.\n"
         "KEEP UNCHANGED — gameplay and identity anchors: face_id, roles, mechanics, "
         "controls, physics, progression, scene goals/hazards/triggers, and every "
         "dialogue_samples entry (transcribed from the source video).\n\n"
         f"{_theme_block(instruct or _NO_THEME)}\n\n"
         "GameDesign JSON:\n" + design.model_dump_json(indent=2)
     )
+
+    # The answer is the whole design document again, so the call gets the
+    # configured ceiling — a fixed 16384 let a reasoning model think the whole
+    # cap away (finish=length, empty body) and the re-skin never arrived.
     try:
-        rewritten = _request_design(_REWRITE_SYSTEM, [user], max_tokens=16384, temperature=0.3)
-    except Exception as e:  # noqa: BLE001 — a failed re-skin must never fail the run
-        log.warning("Design re-skin failed (%s) — keeping the source-faithful design", e)
-        return design
+        rewritten = _request_design(
+            _REWRITE_SYSTEM, [user], max_tokens=settings.llm_max_tokens, temperature=0.3
+        )
+    except LLMOutputError as e:
+        raise LLMOutputError(
+            f"Design re-skin failed ({e}) — stopping before the redraw stage rather "
+            "than shipping a source-faithful design"
+        ) from e
     rewritten.dialogue_samples = design.dialogue_samples  # transcript authority, not the model's
 
     # One-to-one structure: renames ride along, but a collapse/merge/split is
@@ -705,21 +721,17 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
         ("scene", design.scenes, rewritten.scenes),
     ):
         if len(before) != len(after):
-            log.warning(
-                "Design re-skin reshaped the %s list (%d → %d) — keeping the "
-                "source-faithful design",
-                label,
-                len(before),
-                len(after),
+            raise LLMOutputError(
+                f"Design re-skin reshaped the {label} list ({len(before)} → {len(after)}) — "
+                "stopping before the redraw stage rather than shipping a "
+                "source-faithful design"
             )
-            return design
         keys = [safe_name(e.name) for e in after]
         if len(set(keys)) != len(keys):
-            log.warning(
-                "Design re-skin produced duplicate %s name(s) — keeping the source-faithful design",
-                label,
+            raise LLMOutputError(
+                f"Design re-skin produced duplicate {label} name(s) — stopping before the "
+                "redraw stage rather than shipping a source-faithful design"
             )
-            return design
 
     # Back into source order, so asset keys, portraits and scene flow line up
     # with what stage 1 extracted.

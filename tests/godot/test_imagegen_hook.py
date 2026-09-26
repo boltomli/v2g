@@ -95,10 +95,12 @@ class _Chat:
     def __init__(self, text: str = "not json"):
         self.text = text
         self.calls: list[list] = []
+        self.kwargs: list[dict] = []
         self.raises = False
 
     def __call__(self, system: str, parts: list, **kwargs) -> ChatResult:
         self.calls.append(parts)
+        self.kwargs.append(kwargs)
         if self.raises:
             raise RuntimeError("api down")
         return ChatResult(self.text, False, "judge-key")
@@ -163,8 +165,9 @@ def test_restyle_draws_both_candidates_with_kind_specific_briefs(monkeypatch, tm
 def test_the_theme_bookends_the_brief_and_the_design_style_rides_along(monkeypatch, tmp_path):
     """A theme named once at the top loses to the source frame fed in as
     visual context — the brief restates it as a closing mandate and carries
-    the stage-2 design's own art style too. The ref candidate additionally
-    closes on the reference note: text last, frame demoted."""
+    the stage-2 design's own art style too. The brief then rules burned-in
+    text out as its last word; the ref candidate additionally closes on the
+    reference note: text last, frame demoted."""
     provider = _Recording()
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
     design = _design()
@@ -174,13 +177,13 @@ def test_the_theme_bookends_the_brief_and_the_design_style_rides_along(monkeypat
 
     for _, prompt, condition in provider.calls:
         assert "ART STYLE: gothic pixel art, moonlit blues" in prompt
-        assert "THEME MANDATE: vampire style" in prompt
-        last = prompt.split("\n\n")[-1]
+        blocks = prompt.split("\n\n")
+        mandate = next(b for b in blocks if b.startswith("THEME MANDATE:"))
+        assert "the theme wins" in mandate
         if condition:  # ref candidate: the reference note is the final word
-            assert last.startswith("SOURCE FRAME — REFERENCE ONLY")
+            assert blocks[-1].startswith("SOURCE FRAME — REFERENCE ONLY")
         else:
-            assert last.startswith("THEME MANDATE: vampire style")
-            assert "the theme wins" in last
+            assert blocks[-1].startswith("NO BURNED-IN TEXT")
 
 
 def test_the_ref_candidate_is_text_led_with_the_frame_as_reference(monkeypatch, tmp_path, judge):
@@ -216,6 +219,46 @@ def test_frame_caption_is_the_source_frame_as_text(tmp_path, judge):
 
     judge.raises = True
     assert _real_frame_caption(tmp_path / "background.png") == ""
+
+
+def test_the_vision_calls_leave_room_to_think(tmp_path, judge):
+    """Regression: at max_tokens=200 a reasoning model spent the whole cap
+    thinking and answered with an empty body (finish=length) — the caption and
+    every judge call of the restyle came back unusable."""
+    _real_frame_caption(tmp_path / "background.png")
+    G._judge_redraw(
+        "vampire style",
+        "brief",
+        tmp_path / "background.png",
+        tmp_path / "ref.png",
+        tmp_path / "text.png",
+    )
+
+    assert [kw["max_tokens"] for kw in judge.kwargs] == [G._VISION_TOKENS, G._VISION_TOKENS]
+    assert G._VISION_TOKENS >= 6000  # the floor asset_extractor._VERIFY_TOKENS proved out
+
+
+def test_the_caption_never_transcribes_burned_in_text(tmp_path, judge):
+    """i2t is the frame's whole text path into the brief: if it transcribes a
+    subtitle or watermark, the t2i prompt hands the model text to paint."""
+    _real_frame_caption(tmp_path / "background.png")
+
+    assert "Ignore all burned-in text" in judge.calls[-1][0]
+
+
+def test_no_burned_in_text_reaches_any_brief(monkeypatch, tmp_path, judge):
+    """Both candidates get the same rule: the extracted frames carry subtitles
+    and a watermark, and neither may end up in the drawing."""
+    provider = _Recording()
+    monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
+
+    G.restyle_assets(_design(), _assets(tmp_path), "vampire style")
+
+    assert provider.calls, "the redraw did not run"
+    for _, prompt, condition in provider.calls:
+        assert "NO BURNED-IN TEXT" in prompt
+        if condition:  # the source frame rides along for this candidate
+            assert "never reproduce any text the frame carries" in prompt
 
 
 @pytest.mark.parametrize(("pick", "color"), [("ref", NAVY), ("text", GREEN)])

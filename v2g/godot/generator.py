@@ -311,10 +311,22 @@ def _redraw_prompt(design: GameDesign, key: str, style: str) -> str:
         f"disagrees with the theme, the theme wins; do not reproduce the source "
         f"frame's palette or costumes."
     )
+    blocks.append(
+        "NO BURNED-IN TEXT: no subtitles, captions, watermarks, logos or UI overlays "
+        "anywhere in the image. Whatever text the source frame carries is not part of "
+        "the artwork — the game renders its own text at runtime (in-world signage only "
+        "when the SUBJECT asks for it)."
+    )
     return "\n\n".join(blocks)
 
 
 _CAPTION_SYSTEM = "You caption frames for a redraw brief. Answer with plain text only, no preamble."
+
+# The caption and the judge are one-sentence answers, but a reasoning model
+# spends the cap thinking before it answers: at max_tokens=200 it returned an
+# empty body every time (finish=length) — no captions, no usable verdicts. Same
+# floor asset_extractor._VERIFY_TOKENS proved sufficient.
+_VISION_TOKENS = 6000
 
 
 def _frame_caption(path: Path) -> str:
@@ -328,10 +340,12 @@ def _frame_caption(path: Path) -> str:
     ask = (
         "Describe what this source frame shows: the subject and the identity cues that "
         "say WHAT it is (person, item, place). One or two plain sentences. No style, "
-        "palette, composition or drawing advice of any kind."
+        "palette, composition or drawing advice of any kind. Ignore all burned-in text "
+        "— subtitles, captions, watermarks, logos, on-screen titles: they are not part "
+        "of the subject and must never appear in your description."
     )
     try:
-        res = chat(_CAPTION_SYSTEM, [ask, path], temperature=0.0, max_tokens=200)
+        res = chat(_CAPTION_SYSTEM, [ask, path], temperature=0.0, max_tokens=_VISION_TOKENS)
     except Exception as e:  # noqa: BLE001 — a caption enriches the brief, it never gates it
         log.info("imagegen: no source-frame caption (%s) — brief alone", e)
         return ""
@@ -355,7 +369,8 @@ def _reference_prompt(brief: str, caption: str) -> str:
         note += f" What the frame shows: {caption}."
     note += (
         " Draw from the text: never copy the frame's composition, palette, costume, "
-        "pose or lighting."
+        "pose or lighting — and never reproduce any text the frame carries (subtitles, "
+        "captions, watermark): the drawing contains no text at all."
     )
     return f"{brief}\n\n{note}"
 
@@ -385,7 +400,9 @@ def _judge_redraw(style: str, brief: str, original: Path, ref: Path, text: Path)
         'JSON only: {"pick": "ref" | "text", "reason": "one sentence"}'
     )
     try:
-        res = chat(_JUDGE_SYSTEM, [ask, original, ref, text], temperature=0.0, max_tokens=200)
+        res = chat(
+            _JUDGE_SYSTEM, [ask, original, ref, text], temperature=0.0, max_tokens=_VISION_TOKENS
+        )
         data = jsonfix.salvage(res.text)
     except Exception as e:  # noqa: BLE001 — a judge outage must never fail the run
         log.warning("Redraw judge unavailable (%s)", e)
