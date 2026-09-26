@@ -1,4 +1,4 @@
-"""The restyle hook: -i is mandatory-but-reporting, autorestyle is optional.
+"""Stage 2's redraw: always on, theme optional, and never silent about failure.
 
 Each asset is redrawn from a kind-specific brief (character / object / scene)
 and — with `imagegen_ab` — twice: one candidate with the source frame as
@@ -115,14 +115,18 @@ def judge(monkeypatch) -> _Chat:
     return stub
 
 
-def test_restyle_is_gated_on_instruct_and_assets(monkeypatch, tmp_path):
+def test_restyle_is_gated_on_assets_not_on_the_theme(monkeypatch, tmp_path):
+    """Stage 2 redraws with a theme or without one — only an empty asset set
+    stops it (there would be nothing to draw)."""
     provider = _Recording()
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
-    monkeypatch.setattr(G.settings, "imagegen_autorestyle", False)
-    G._restyle_assets(_design(), _assets(tmp_path), None)
-    G._restyle_assets(_design(), _assets(tmp_path), "")
-    G._restyle_assets(_design(), {}, "vampire style")
+
+    G.restyle_assets(_design(), {}, "vampire style")
+    G.restyle_assets(_design(), {}, None)
     assert provider.calls == []
+
+    G.restyle_assets(_design(), _assets(tmp_path), None)
+    assert provider.calls, "no theme must still redraw — the art only has to differ"
 
 
 def test_restyle_draws_both_candidates_with_kind_specific_briefs(monkeypatch, tmp_path):
@@ -130,7 +134,7 @@ def test_restyle_draws_both_candidates_with_kind_specific_briefs(monkeypatch, tm
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
     assets = _assets(tmp_path)
 
-    G._restyle_assets(_design(), assets, "vampire style")
+    G.restyle_assets(_design(), assets, "vampire style")
 
     briefs = {name: prompt for name, prompt, _ in provider.calls}
     conds = {(name, condition) for name, _, condition in provider.calls}
@@ -139,7 +143,7 @@ def test_restyle_draws_both_candidates_with_kind_specific_briefs(monkeypatch, tm
     assert all(p.startswith("Redraw in this theme: vampire style") for p in briefs.values())
 
     char = briefs["char_lady___the_bride.png"]
-    assert "dynamic action pose" in char and "must differ from the source frame" in char
+    assert "half-body portrait" in char and "must differ from the source frame" in char
     assert "SUBJECT below" in char  # the design, not the frame, defines the look
     assert "Lady / The Bride (protagonist): white gown, silver hair" in char
 
@@ -160,7 +164,7 @@ def test_judge_pick_keeps_that_candidate(monkeypatch, tmp_path, judge, pick, col
     bg = assets["background"]
     judge.text = f'{{"pick": "{pick}", "reason": "follows the brief"}}'
 
-    G._restyle_assets(_design(), assets, "vampire style")
+    G.restyle_assets(_design(), assets, "vampire style")
 
     assert _color(assets["characters/lady___the_bride"]) == color
     assert _color(assets["background"]) == color
@@ -176,7 +180,7 @@ def test_without_a_usable_judge_the_bigger_change_wins(monkeypatch, tmp_path, ju
     assets = _assets(tmp_path)
 
     with caplog.at_level(logging.INFO, logger=G.log.name):
-        G._restyle_assets(_design(), assets, "vampire style")
+        G.restyle_assets(_design(), assets, "vampire style")
 
     assert _color(assets["background"]) == GREEN  # text-only moved furthest from BLUE
     assert "changed the source most" in caplog.text
@@ -190,7 +194,7 @@ def test_judge_outage_still_restyles_via_visual_difference(monkeypatch, tmp_path
     judge.raises = True
 
     with caplog.at_level(logging.WARNING, logger=G.log.name):
-        G._restyle_assets(_design(), assets, "vampire style")
+        G.restyle_assets(_design(), assets, "vampire style")
 
     assert "Redraw judge unavailable" in caplog.text
     assert _color(assets["background"]) == GREEN
@@ -204,7 +208,7 @@ def test_one_surviving_candidate_wins_without_the_judge(monkeypatch, tmp_path, j
     assets = _assets(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger=G.log.name):
-        G._restyle_assets(_design(), assets, "vampire style")
+        G.restyle_assets(_design(), assets, "vampire style")
 
     assert judge.calls == []
     assert all(condition for _, _, condition in provider.calls)  # only ref attempts ran
@@ -218,7 +222,7 @@ def test_ab_off_draws_one_reference_candidate_beside_the_frame(monkeypatch, tmp_
     monkeypatch.setattr(G.settings, "imagegen_ab", False)
     assets = _assets(tmp_path)
 
-    G._restyle_assets(_design(), assets, "vampire style")
+    G.restyle_assets(_design(), assets, "vampire style")
 
     assert [(name, cond) for name, _, cond in provider.calls] == [
         ("background.png", True),
@@ -245,7 +249,7 @@ def test_both_candidates_are_kept_for_comparison(monkeypatch, tmp_path, judge):
 
     run = runlog.start_run("src.mp4", tmp_path / "run")
     try:
-        G._restyle_assets(_design(), assets, "vampire style")
+        G.restyle_assets(_design(), assets, "vampire style")
         kept = sorted(p.name for p in (run / "work" / "imagegen").iterdir())
     finally:
         runlog.reset()
@@ -265,7 +269,7 @@ def test_restyle_keeps_originals_when_provider_unavailable(monkeypatch, tmp_path
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
     assets = _assets(tmp_path)
 
-    G._restyle_assets(_design(), assets, "vampire style")
+    G.restyle_assets(_design(), assets, "vampire style")
 
     assert provider.calls == []
     assert _color(assets["background"]) == BLUE
@@ -278,7 +282,7 @@ def test_restyle_keeps_the_original_of_a_failing_asset(monkeypatch, tmp_path, ca
     char = assets["characters/lady___the_bride"]
 
     with caplog.at_level(logging.WARNING, logger=G.log.name):
-        G._restyle_assets(_design(), assets, "vampire style")
+        G.restyle_assets(_design(), assets, "vampire style")
 
     assert assets["characters/lady___the_bride"] == char  # both candidates failed
     assert _color(char) == BLUE
@@ -292,25 +296,23 @@ def test_restyle_keeps_the_original_of_a_failing_asset(monkeypatch, tmp_path, ca
     assert "1/3 asset(s) kept their original frames" in caplog.text
 
 
-def test_autorestyle_uses_design_style_without_instruct(monkeypatch, tmp_path):
+def test_without_a_theme_the_redraw_only_has_to_differ(monkeypatch, tmp_path):
     provider = _Recording()
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
-    monkeypatch.setattr(G.settings, "imagegen_autorestyle", True)
 
-    G._restyle_assets(_design(), _assets(tmp_path), None)
+    G.restyle_assets(_design(), _assets(tmp_path), None)
 
-    assert provider.calls, "auto switch must trigger restyle without -i"
+    assert provider.calls, "stage 2 runs without a theme"
     assert all(
-        prompt.startswith("Redraw in this theme: s") for _, prompt, _ in provider.calls
-    )  # design.style summary
+        "differs from the source video" in prompt for _, prompt, _ in provider.calls
+    )  # no theme: unlike the source is the whole brief
 
 
-def test_instruct_wins_over_autorestyle(monkeypatch, tmp_path):
+def test_the_theme_supplies_the_redraw_style(monkeypatch, tmp_path):
     provider = _Recording()
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
-    monkeypatch.setattr(G.settings, "imagegen_autorestyle", True)
 
-    G._restyle_assets(_design(), _assets(tmp_path), "vampire style")
+    G.restyle_assets(_design(), _assets(tmp_path), "vampire style")
 
     assert all(
         prompt.startswith("Redraw in this theme: vampire style") for _, prompt, _ in provider.calls
@@ -323,19 +325,19 @@ def test_instruct_without_provider_is_reported_not_silent(monkeypatch, tmp_path,
     assets = _assets(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger=G.log.name):
-        G._restyle_assets(_design(), assets, "vampire style")
+        G.restyle_assets(_design(), assets, "vampire style")
 
     assert "NOT restyled" in caplog.text
     assert _color(assets["background"]) == BLUE
 
 
-def test_autorestyle_without_provider_is_a_notice(monkeypatch, tmp_path, caplog):
+def test_redraw_without_provider_is_a_notice(monkeypatch, tmp_path, caplog):
+    """Stage 2 with no backend: said out loud, frames kept as they were."""
     monkeypatch.setattr(image_gen, "get_provider", lambda: image_gen.NullProvider())
-    monkeypatch.setattr(G.settings, "imagegen_autorestyle", True)
     assets = _assets(tmp_path)
 
     with caplog.at_level(runlog.NOTICE, logger=G.log.name):
-        G._restyle_assets(_design(), assets, None)
+        G.restyle_assets(_design(), assets, None)
 
-    assert "Auto-restyle skipped" in caplog.text
+    assert "Redraw skipped" in caplog.text
     assert _color(assets["background"]) == BLUE

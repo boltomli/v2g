@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     frame_budget: int = 40  # max keyframes to send to LLM (long video cap)
     scene_threshold: float = 0.3  # ffmpeg scene-detect sensitivity (0.0–1.0, lower = more frames)
     chunk_duration: int = 60  # seconds per analysis chunk (detail mode); must be ≤ max_duration
+    asset_verify: bool = (
+        True  # vision model must confirm each extracted frame (V2G_ASSET_VERIFY=0 off)
+    )
 
     # Image generation (local Qwen-Image-2.1 via the optional `imagegen` extra)
     imagegen_provider: str = ""  # "" = off (assets stay raw frames) | "qwen" = local Qwen-Image-2.1
@@ -38,7 +41,6 @@ class Settings(BaseSettings):
     imagegen_style: str = ""  # global style prefix for all image gen prompts
     imagegen_steps: int = 20  # denoising steps (Qwen's default is 40 — time scales with it)
     imagegen_max_side: int = 1024  # longest output edge — lower to save RAM/VRAM
-    imagegen_autorestyle: bool = False  # redraw assets even without -i; prompt = design.style
     imagegen_ab: bool = False  # draw text-only AND reference candidates per asset, judge picks one
 
     # Output

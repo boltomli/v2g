@@ -4,16 +4,26 @@ Transform any video into a playable Godot 4.x game using LLM-powered analysis.
 
 ## How It Works
 
+Three stages, each feeding the next — nothing from a later stage ever reaches
+back into an earlier one:
+
 ```
 Video (file/URL)
-    │
-    ├─ Subtitles → transcript (source-language dialogue, authoritative)
-    ├─ Fast mode: ffmpeg extracts keyframes ─┐
-    │                                         ▼
-    └─ Detail mode (-d): full video ───▶ LLM Analysis ──▶ Visual Novel Project
-                                         (multimodal)      (bilingual VN:
-                                                            source line +
-                                                            Chinese subtitle)
+    │  Subtitles → transcript (source-language dialogue, authoritative)
+    ▼
+Stage 1 · analyze the ORIGINAL video + extract its assets
+    Fast mode: ffmpeg keyframes ─┐   faithful GameDesign (characters, story,
+    Detail mode (-d): full video ┴─▶ scenes, props) + the frames that show them:
+                                   background/stills keep the video's aspect,
+                                   char/obj sprites are 512×512 and model-checked
+    ▼
+Stage 2 · rewrite + redraw — with your theme, or none
+    design re-skin (theme when given, otherwise "must differ from the source")
+    assets redrawn beside their frames (local image gen; -i supplies the theme)
+    ▼
+Stage 3 · generate the game flow and copy
+    Visual-novel Godot 4.x project (bilingual VN: source line + Chinese subtitle)
+    voice-over / background music: planned, not implemented yet
 ```
 
 Key properties of generated games:
@@ -24,7 +34,7 @@ Key properties of generated games:
   plus a Simplified Chinese subtitle; narration and UI are Chinese-only.
   Source-language text is extracted from the video's subtitles — never invented.
 
-Two analysis modes:
+Two analysis modes (both part of stage 1):
 
 | | Fast (default) | Detail (`-d`) |
 |---|---|---|
@@ -33,9 +43,19 @@ Two analysis modes:
 | Output fields | Core design | + physics, behavior, layout, progression |
 | Cost / speed | Lower / faster | Higher / slower |
 
-1. **Extract** — Samples keyframes or prepares video for upload (yt-dlp + ffmpeg); pulls subtitles (sidecar or embedded) as the source-language transcript when available.
-2. **Analyze** — Sends to multimodal LLM with the transcript injected; returns a structured game design with bilingual dialogue.
-3. **Generate** — Scaffolds a visual-novel Godot 4.x project (`project.godot`, `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`), compile-checks every script (one LLM repair pass, then fallback, on parse errors), then runs Godot headless to import assets and self-check.
+1. **Analyze + extract** — samples keyframes or prepares the video for upload
+   (yt-dlp + ffmpeg), pulls subtitles (sidecar or embedded) as the
+   source-language transcript, returns a faithful game design with bilingual
+   dialogue, then cuts the assets out of the original video.
+2. **Rewrite + redraw** — re-skins the design's presentation with the theme you
+   passed (`-i`) or, with none, simply so it no longer looks like the source;
+   names, ids and dialogue stay fixed. The assets are then redrawn beside their
+   frames when an image-gen backend is configured (skip is always reported).
+3. **Generate** — scaffolds a visual-novel Godot 4.x project (`project.godot`,
+   `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`),
+   compile-checks every script (one LLM repair pass, then fallback, on parse
+   errors), then runs Godot headless to import assets and self-check.
+   Voice-over and background music are planned but not implemented yet.
 
 ## Prerequisites
 
@@ -68,6 +88,10 @@ uv run v2g "https://www.youtube.com/watch?v=..."
 
 # Custom run directory (default: projects/<timestamp>_<source>/ — new per run)
 uv run v2g ./clip.mp4 -o ./my_game
+
+# Stage 2 theme — rewrite + redraw in a theme (omit it: the art only has to
+# differ from the source video; extraction is the same either way)
+uv run v2g ./clip.mp4 -i "vampire theme"
 ```
 
 Every run gets its own `projects/<timestamp>_<source>/` directory holding
@@ -106,8 +130,8 @@ All settings via environment variables (or `.env` file):
 | `V2G_IMAGEGEN_STYLE` | — | Style prefix prepended to all image-gen prompts |
 | `V2G_IMAGEGEN_STEPS` | `20` | Image-gen denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
-| `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets even without `-i` (prompt = `design.style`) |
 | `V2G_IMAGEGEN_AB` | — | Per asset, draw text-only and source-referenced candidates and keep the judge's pick (`1` = on; off = reference only) |
+| `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
 
 ## Development
 
@@ -140,7 +164,7 @@ v2g/
 │   ├── video/
 │   │   ├── extractor.py     # frame extraction (+ subtitle download for URLs)
 │   │   ├── dialogue.py      # subtitle transcript extraction (source language)
-│   │   ├── asset_extractor.py  # scene-anchored, hash-deduplicated asset frames
+│   │   ├── asset_extractor.py  # shot-anchored, model-verified, 512×512 sprite frames
 │   ├── llm/
 │   │   ├── client.py        # OpenAI API wrapper
 │   │   └── analyzer.py      # frames/video → bilingual game design

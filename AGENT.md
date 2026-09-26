@@ -2,7 +2,19 @@
 
 ## Overview
 
-`v2g` is a pipeline that transforms a video into a playable Godot 4.x game project.
+`v2g` is a pipeline that transforms a video into a playable Godot 4.x game
+project, in **three stages that only ever flow forwards**:
+
+1. **Analyze the original video, extract its assets** — characters, story,
+   scenes and props come out of the source itself, plus the frames that show
+   them. Faithful, theme-free: one video produces one analysis and one set of
+   assets, whatever theme is asked for later.
+2. **Rewrite and redraw — with the given theme, or none** — the design's
+   presentation is re-skinned (with no theme it only has to differ from the
+   source video) and the assets are redrawn beside their frames.
+3. **Generate the game flow and copy** — the Godot project: script flow,
+   dialogue, choices, HUD. Voice-over and background music are **planned but
+   not implemented yet**.
 
 ```
 Video (file / URL)
@@ -12,42 +24,54 @@ Video (file / URL)
   │                                          Transcript extraction (ffmpeg)
   │                                           └─ source-language lines ONLY
   │                                              (sidecar / embedded subs)
-  ├─ Fast mode (default): ffmpeg extracts N keyframes ──┐      │
-  │                                                      ▼      │
-  ├─ Detail mode (-d): ffmpeg trims/compresses ──▶ LLM analyzes ─┘ ──▶ GameDesign JSON
-  │                                                      │
-  │                                                      ▼
-  │                                              Asset Extractor (ffmpeg)
-  │                                               ├─ Background frames
-  │                                               ├─ Character sprites (byte-distinct)
-  │                                               └─ Object sprites
-  │                                                      │
-  │                              ┌────────────────────────┘
-  │                              ▼
-  │                      [Image Gen Provider] ← optional (V2G_IMAGEGEN_PROVIDER=qwen)
-  │                       (per-kind redraw: A/B candidates + judge)
-  │                              │
-  └──────────────────────────────┼───────────────────────────────┘
-                                 ▼
-                         Godot Project Generator  (visual novel)
-                                 │  └─ Godot script check + repair, import, headless boot (self-check)
-                                 ▼
+  ▼
+┌ Stage 1 ─ analyze the ORIGINAL video + extract its assets ─────────────────┐
+│                                                                            │
+│  Fast mode: ffmpeg keyframes ─┐                                            │
+│  Detail mode (-d): full video ┴─▶ LLM analysis ─▶ GameDesign (faithful)    │
+│                                     │                                      │
+│                                     ▼                                      │
+│                              Asset Extractor (ffmpeg + vision check)       │
+│                               ├─ background + scene stills (video aspect)  │
+│                               ├─ char sprites (512×512 half-body)          │
+│                               └─ obj sprites (512×512)                     │
+└────────────────────────────────────┬───────────────────────────────────────┘
+                                     ▼
+┌ Stage 2 ─ rewrite + redraw (theme given, or none) ─────────────────────────┐
+│  rewrite_design()  text re-skin: the theme when there is one, otherwise    │
+│                    "unlike the source"; names, ids and dialogue frozen     │
+│  restyle_assets()  per-kind redraw beside each frame (image-gen provider;  │
+│                    -i supplies the theme, no -i = art only has to differ)  │
+└────────────────────────────────────┬───────────────────────────────────────┘
+                                     ▼
+┌ Stage 3 ─ generate the game flow and copy ─────────────────────────────────┐
+│  Godot Project Generator (visual novel)                                    │
+│    └─ script check + repair, import, headless boot (self-check)            │
+│  voice-over / background music: planned, not implemented yet               │
+└────────────────────────────────────┬───────────────────────────────────────┘
+                                     ▼
                           projects/<run-id>/         (fresh directory per run)
                           ├── v2g.log               (full run log)
                           ├── work/                 (frames; downloads/segments when media cache off)
                           ├── llm/                  (raw LLM responses)
+                          ├── design.json           (stage 1 checkpoint)
                           ├── project.godot        (advance input only)
                           ├── main.tscn            (Control root + GameManager)
                           ├── vn_manager.gd        (template-owned VN runtime,
                           │                         bilingual story embedded)
                           ├── game_manager.gd
-                          ├── assets/              ← extracted video frames
+                          ├── assets/              ← extracted frames (+ *.redraw.png)
                           │   ├── background.png
                           │   ├── char_*.png
                           │   ├── obj_*.png
                           │   └── scene_*.png
                           └── game_design.json
 ```
+
+The stage boundary is the decoupling point: stage 2 can never reach back into
+stage 1 (the theme is not part of the analysis prompt or of `analysis_key`, so
+every themed variant of one video reuses the same analysis and the same
+assets), and stage 3 only reads what stages 1 and 2 produced.
 
 ## Modes
 
@@ -107,6 +131,7 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_FRAME_BUDGET` | `40` | Max keyframes to send to LLM (long video cap) |
 | `V2G_SCENE_THRESHOLD` | `0.3` | ffmpeg scene-detect sensitivity (0.0–1.0) |
 | `V2G_CHUNK_DURATION` | `60` | Seconds per analysis chunk (detail mode; must be ≤ `V2G_MAX_DURATION`) |
+| `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB per chunk |
 
 ## Language & dialogue contract
@@ -219,10 +244,10 @@ class DialogueChoice:
 | `vn_manager.gd` | template | VN runtime: embedded bilingual story, dialogue box (source line + Chinese subtitle), choices, portraits, background flashes, restart |
 | `game_manager.gd` | LLM | Game state honoring the `score_changed`/`add_score` contract (template fallback) |
 | `*.gd` (extras) | LLM | Optional extras: alliance map, minigames, audio, save/load |
-| `assets/background.png` | ffmpeg | Representative frame from video midpoint as scene background |
-| `assets/char_*.png` | ffmpeg | Character sprite frames — seeded per entity and hash-checked byte-distinct |
-| `assets/obj_*.png` | ffmpeg | Object sprite frames (collectibles, weapons, etc.) |
-| `assets/scene_*.png` | ffmpeg | Additional scene backgrounds for multi-scene videos |
+| `assets/background.png` | ffmpeg | Representative frame from video midpoint — untouched frame, source aspect |
+| `assets/char_*.png` | ffmpeg | Character sprites — 512×512 half-body squares, shot-pooled across the video, hash-checked byte-distinct, model-verified |
+| `assets/obj_*.png` | ffmpeg | Object sprites (collectibles, weapons, etc.) — 512×512 squares, model-verified |
+| `assets/scene_*.png` | ffmpeg | Additional scene backgrounds for multi-scene videos — untouched frames, source aspect |
 | `game_design.json` | analyzer | Full design document as project metadata |
 
 After writing files, the generator compile-checks every script with
@@ -234,65 +259,125 @@ script errors surface at **generation time**.
 
 ### Asset extraction
 
-After LLM analysis, the pipeline extracts visual assets from the source video:
-- **Background**: A representative frame from the video midpoint → `assets/background.png`
-- **Characters**: Frames from a per-entity seeded time window, cropped using the
-  LLM's spatial descriptions → `assets/char_<name>.png`
-- **Objects**: key-object roles match on any slash-separated token with the
-  Chinese glosses folded in (`decoration / 身份标识`, `身份标识 / 互动道具`,
-  `装饰 / 遮挡物` all hit the key set), UI-layer props (spatial/icons that
-  live in a panel, never in a frame) are skipped, and each object is anchored
-  to the scene that names it — bigram overlap between the object's name (or,
-  for worn props, its `visual`/`behavior` naming the wearer) and the scene's
-  text. Sampling then happens inside that scene's **establishing shot = the
-  shot starting at the boundary (video start or detected cut) NEAREST the
-  scene's timeline cell, sampled from its midpoint** (cells are equal-duration
-  and misalign cuts — measured: "longest shot" picked a4.5 s dialogue beat
-  over the2.5 s prop wide; "first segment of the cell" picked a leftover tail
-  of the previous scene), cropped by the object's `spatial` hint. Worn props
-  honor body部位 keywords too
-  (胸前 → chest band, 腰侧 → waist band) so the sprite shows the wear region,
-  not the wearer's face. Objects with no scene match keep the seeded window.
-- **Scenes**: Additional background frames for multi-scene videos → `assets/scene_<name>.png`
+After LLM analysis, the pipeline extracts visual assets from the source video,
+then shapes each one for its kind:
 
-**Distinctness guarantee**: each entity samples its own window of the timeline
-(scene establishing shot for objects, name-seeded otherwise), and every accepted
-sprite's SHA-256 is checked against everything already extracted — duplicates
-are re-taken with jittered stamps. One entity can never receive another
-entity's byte-identical frame.
+- **Characters → 512×512 half-body sprites** (`assets/char_<name>.png`): a
+  square that starts at the head and stops near the waist, cropped around the
+  subject — a raw 16:9 frame showed a letterboxed strip in the portrait slot
+  and threw the width away.
+- **Objects → 512×512 squares** (`assets/obj_<name>.png`): the item kept whole
+  and centred, with margin.
+- **Background and scene stills → the untouched frame**, so they keep the
+  source video's own aspect ratio (`assets/background.png`,
+  `assets/scene_<name>.png`).
 
-Spatial cropping uses the `spatial` field from `GameObject` analysis — English
-and Chinese framing words both parse (the LLM answers in the video's language):
-- "left side of frame" / "画面左侧近景" → crops to left 40%
-- "center" / "骑士胸口正中" → crops to center 60%
-- "right third" / "右腰侧" → crops to right 40%
-- "上方正中，顶部" → top-center 50% × top 45%
-- No hint → full frame
+Framing for a sprite comes from the **model's bounding box**, else the design's
+`spatial` hint, else the frame centre — always clamped inside the picture area
+(`_content_rect`), so the letterbox bars baked into a 2.35:1 source never reach
+a sprite. Stills keep the bars: they are part of the video.
 
-### Image generation (optional, local)
+**Content gate** — every candidate frame is checked before it ships:
 
-Extracted assets can be re-drawn in a target style by a **local Qwen-Image-2.1**
-model instead of shipping raw video frames. Two triggers:
+1. **Blank gate**: mean brightness under 10 (a transition or black card)
+   demotes the candidate to the back of the queue — it may still ship for a
+   genuinely dark scene, it never leads.
+2. **Model check** (`V2G_ASSET_VERIFY`, default on), at most two calls per
+   asset:
+   - **Pick** — every candidate is cut at once and shown as **one contact
+     sheet** (a 3-column grid of up to 12 shots), so a single call ranks all
+     of them instead of judging frames one by one. The prompt ranks *by
+     plausibility* ("do not withhold a cell because the shot is wide or the
+     subject small"): asking "is it visible?" on thumbnails came back empty
+     for every sprite.
+   - **Locate** — a sprite's ranked pick is then checked at full size; that
+     answer carries the bounding box the crop is taken from. Stills ship
+     straight from the pick (they are never cropped).
+   A refusal falls through to the next ranked pick; when nothing qualifies
+   (or every pick is taken) the first candidate ships anyway with a warning,
+   so an asset never silently disappears. Any failure — no key, unreachable
+   endpoint, an answer the reasoning endpoint never finished — disables the
+   gate for the rest of the run: one warning, extraction otherwise unchanged
+   (`V2G_ASSET_VERIFY=0` skips it entirely). The budget is 6000 tokens
+   precisely because a reasoning endpoint burned 2000 on thinking and
+   answered nothing.
 
-- **`-i/--instruct <style>` — mandatory.** The run must restyle; if no image-gen
-  backend can run (provider unset, CUDA/deps missing), it logs an explicit
-  warning that assets were **NOT** restyled instead of silently skipping.
-  The same text is injected into the analysis as a **THEME INSTRUCTION** that
-  demands a full redesign — only the story structure and beat order survive;
-  every visual field (character looks/outfits/poses, object shapes/materials,
-  scene layouts/palettes) must be rewritten to the theme, and the theme wins
-  wherever it disagrees with the source video.
-- **`V2G_IMAGEGEN_AUTORESTYLE=1` — automatic.** No `-i` needed: the prompt is
-  the design's own `style` summary of the source video. A skipped run is
-  reported at NOTICE level (not silently).
+**Candidate pool** — every asset samples *shot midpoints* (ffmpeg cut
+detection), never bare timeline fractions:
+- **objects and scenes**: the scene's establishing shot and its cell's shots
+  first, then the rest of the video spread evenly — the anchor is a hint, not
+  a cage, because an equal-duration cell can miss its content entirely;
+- **characters and unmatched objects**: the whole timeline, evenly, shifted
+  per entity so two entities don't sample the same shots;
+- **background**: the shot nearest the middle.
 
-Every asset is redrawn from a **kind-specific brief** built in
+The pool fills one contact sheet (≤ 12 shots); a single unbroken take is split
+into interior samples so entities still land on different frames.
+
+**Object anchoring**: key-object roles match on any slash-separated token with
+the Chinese glosses folded in (`decoration / 身份标识`, `身份标识 / 互动道具`,
+`装饰 / 遮挡物` all hit the key set), UI-layer props (spatial/icons that
+live in a panel, never in a frame) are skipped, and each object is anchored
+to the scene that names it — bigram overlap between the object's name (or,
+for worn props, its `visual`/`behavior` naming the wearer) and the scene's
+text. Sampling then happens inside that scene's **establishing shot = the
+shot starting at the boundary (video start or detected cut) NEAREST the
+scene's timeline cell, sampled from its midpoint** (cells are equal-duration
+and misalign cuts — measured: "longest shot" picked a4.5 s dialogue beat
+over the2.5 s prop wide; "first segment of the cell" picked a leftover tail
+of the previous scene). Scene stills use the same pool instead of bare
+timeline fractions, so they land on content rather than on cuts. Worn
+props honor body部位 keywords too (胸前 → chest band, 腰侧 → waist band) so the
+sprite shows the wear region, not the wearer's face. Objects with no scene
+match simply search the whole timeline.
+
+**Distinctness guarantee**: every accepted sprite's SHA-256 is checked against
+everything already extracted — a duplicate falls through to the next ranked
+pick, and the first candidate is the last resort. One entity can never receive
+another entity's byte-identical frame.
+
+**Spatial hints** are the fallback framing when the model returns no box —
+English and Chinese framing words both parse (the LLM answers in the video's
+language):
+- "left side of frame" / "画面左侧近景" → left 40% of the frame
+- "center" / "骑士胸口正中" → centre 60%
+- "right third" / "右腰侧" → right 40%
+- "上方正中，顶部" → top-centre 50% × top 45%
+- No hint → the whole frame (squared to 512×512 for sprites)
+
+### Stage 2: rewrite + redraw (redraw needs a local model)
+
+Stage 2 has two halves and both run **after** stage 1, whatever the theme:
+
+1. **`rewrite_design(design, instruct)`** (`v2g/llm/analyzer.py`) — a
+   text-only re-skin of the design, one cached chat call. With
+   **`-i/--instruct <style>`** the style becomes a **THEME INSTRUCTION**
+   demanding a full redesign: only story structure, beat order and character
+   motivations survive, every visual field is rewritten to the theme, and the
+   theme wins wherever it disagrees with the source video. **Without a theme**
+   the same rewrite runs on a weaker brief — keep the world recognisable, but
+   the result must not look like the source video. Identity is frozen either
+   way: character / object / scene names, `face_id` and every
+   `dialogue_samples` entry are validated (and dialogue restored) after the
+   call, because stage 1's asset keys, speaker→portrait mapping and scene keys
+   are built from them — a rewrite that renames or drops an id is discarded
+   and the faithful design ships. A failed rewrite does the same.
+2. **`restyle_assets(design, assets, instruct)`** (`v2g/godot/generator.py`)
+   — the image half: each extracted asset is re-drawn in that style by a
+   **local Qwen-Image-2.1** model instead of shipping the raw video frame.
+   With no theme the brief is "a cohesive art style that differs from the
+   source video" — the whole bar is being unlike the source. If no image-gen
+   backend can run (provider unset, CUDA/deps missing) it is said out loud
+   (warning when `-i` was given, NOTICE otherwise) and the frames stay as
+   extracted — never a silent skip.
+
+The redraw is driven by a **kind-specific brief** built in
 `v2g/godot/generator.py` (`_redraw_prompt`) — theme line + directive + subject.
-The SUBJECT (from the design, rewritten to the theme) defines what the thing
-IS; the source frame only marks what must not be copied:
-- **characters** → drawn fresh in a dynamic action pose, isolated on a plain
-  background; outfit/hairstyle/colors follow the SUBJECT while framing, stance
-  and background differ from the source frame
+The SUBJECT (the stage-2 design) defines what the thing IS; the source frame
+only marks what must not be copied:
+- **characters** → drawn fresh as a square half-body portrait (head and torso),
+  isolated on a plain background; outfit/hairstyle/colors follow the SUBJECT
+  while framing, stance and background differ from the source frame
 - **objects** → the item cut out and centered alone as standalone item art —
   no scenery, no characters — drawn fresh to fit the theme
 - **scenes / background** → a redesigned wide view: fresh layout, palette,
@@ -349,7 +434,6 @@ full bf16 repo on a big-GPU machine).
 | `V2G_IMAGEGEN_STYLE` | — | Global style prefix prepended to all prompts |
 | `V2G_IMAGEGEN_STEPS` | `20` | Denoising steps |
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge (aspect kept, dims ÷32) |
-| `V2G_IMAGEGEN_AUTORESTYLE` | — | Re-draw assets without `-i` (prompt = `design.style`) |
 | `V2G_IMAGEGEN_AB` | — | Off: one source-referenced candidate per asset. `1` = also draw a text-only candidate and let the judge pick |
 
 To implement a new provider: subclass `ImageGenProvider` in

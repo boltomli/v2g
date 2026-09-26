@@ -38,7 +38,8 @@ def main(argv: list[str] | None = None) -> None:
         "--instruct",
         type=str,
         default=None,
-        help="Optional style instruction, e.g. 'change to medieval', 'vampire theme', 'Lord of the Rings style'",
+        help="Theme for stage 2 (rewrite + redraw), e.g. 'vampire theme', 'medieval'. "
+        "Without it stage 2 still runs — the art only has to differ from the source video.",
     )
     parser.add_argument("--version", action="version", version=f"v2g {__version__}")
     args = parser.parse_args(argv)

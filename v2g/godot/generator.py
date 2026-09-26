@@ -220,10 +220,10 @@ def _safe_name(title: str) -> str:
 # shows what must NOT be copied — presentation, framing, pixels.
 _DIRECTIVES: dict[str, str] = {
     "characters": (
-        "Redraw this CHARACTER as a full-body portrait in a dynamic action pose, drawn "
-        "fresh — never lifted from the source frame. Outfit, hairstyle and colors follow "
-        "the SUBJECT below; framing, stance and background must differ from the source "
-        "frame. Isolate the figure on a plain background."
+        "Redraw this CHARACTER as a square half-body portrait (head and torso, cut at the "
+        "waist) in a dynamic pose, drawn fresh — never lifted from the source frame. Outfit, "
+        "hairstyle and colors follow the SUBJECT below; framing, stance and background must "
+        "differ from the source frame. Fill the square with the figure on a plain background."
     ),
     "objects": (
         "Draw this OBJECT alone as standalone item art: one item as described in the "
@@ -239,6 +239,9 @@ _DIRECTIVES: dict[str, str] = {
     ),
 }
 _DIRECTIVES["background"] = _DIRECTIVES["scenes"]  # the main background is a scene view
+
+# Stage 2 without a user theme: the art only has to differ from the source.
+_NO_THEME_STYLE = "a cohesive art style that differs from the source video"
 
 
 def _scene_subject(scene: SceneDesign) -> str:
@@ -398,17 +401,18 @@ def _redraw_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.redraw{path.suffix}")
 
 
-def _restyle_assets(
+def restyle_assets(
     design: GameDesign,
     assets: dict[str, Path],
     instruct: str | None,
 ) -> None:
-    """Re-draw each extracted asset in a target style, beside the original.
+    """Stage 2 (image half): re-draw every extracted asset, beside the original.
 
-    Trigger: an explicit ``-i/--instruct`` (mandatory — a request that cannot
-    run is reported, never silently dropped) or ``V2G_IMAGEGEN_AUTORESTYLE``
-    (auto: the prompt is the design's own style summary of the source video).
-    Without a style request the raw frames are the correct output.
+    Runs after the re-skin, with or without a theme: ``instruct`` supplies the
+    theme when there is one, otherwise the art only has to differ from the
+    source video (the briefs already forbid lifting its framing). The stage is
+    skipped only when no image-gen backend can run — and that is always said
+    out loud, never silently.
 
     Every asset is redrawn from a kind-specific brief (new look/clothes/pose for
     characters, the object alone, a redesigned scene). The result is written to
@@ -426,18 +430,7 @@ def _restyle_assets(
     from v2g.llm.image_gen import NullProvider, get_provider
 
     request = (instruct or "").strip()
-    if request:
-        style = request
-    elif settings.imagegen_autorestyle:
-        style = design.style.strip()
-        if not style:
-            log.log(
-                runlog.NOTICE,
-                "Auto-restyle on but the design has no style summary — keeping raw frames",
-            )
-            return
-    else:
-        return
+    style = request or _NO_THEME_STYLE
 
     provider = get_provider()
     unfulfilled: str | None = None
@@ -453,11 +446,10 @@ def _restyle_assets(
                 unfulfilled,
             )
         else:
-            log.log(runlog.NOTICE, "Auto-restyle skipped: %s", unfulfilled)
+            log.log(runlog.NOTICE, "Redraw skipped: %s — assets stay extracted frames", unfulfilled)
         return
 
-    mode = "" if request else " (auto)"
-    log.log(runlog.NOTICE, "Restyling %d asset(s) with imagegen%s", len(assets), mode)
+    log.log(runlog.NOTICE, "Restyling %d asset(s) with imagegen", len(assets))
     failures = 0
     with _candidates_dir(settings.imagegen_ab) as cand_dir:
         modes = (("ref", True), ("text", False)) if cand_dir else (("ref", True),)
@@ -612,20 +604,23 @@ def _ensure_essentials(
 def generate(
     design: GameDesign,
     project_root: Path,
-    video_path: Path | None = None,
     *,
-    instruct: str | None = None,
+    assets: dict[str, Path] | None = None,
+    video_size: tuple[int, int] | None = None,
 ) -> Path:
-    """Create a full Godot project directory. Returns the project path.
+    """Stage 3: create the Godot project — game flow and copy — and return its path.
+
+    Stages 1 (analyze the original + extract its assets) and 2 (re-skin and
+    redraw, theme or not) already ran in the pipeline, so this function only
+    turns the finished design plus the finished assets into a project.
 
     Args:
-        design: The game design document.
+        design: The design as it stands **after** the stage-2 re-skin.
         project_root: Directory to write the project into — the run directory
             created by ``runlog.start_run`` at pipeline start.
-        video_path: Source video for asset extraction. If provided, frames are
-            extracted as sprites/backgrounds and placed in assets/.
-        instruct: Optional style instruction — when set (and an image-gen
-            provider is configured), extracted assets are restyled first.
+        assets: Stage 1's extracted sprites/stills, repointed at stage 2's
+            redraws when those ran.
+        video_size: Source video's pixel size — the window follows its aspect.
 
     Generated structure:
         <project>/
@@ -640,51 +635,37 @@ def generate(
     if project_root is None:
         project_root = settings.output_root / _safe_name(design.title)
     project_root.mkdir(parents=True, exist_ok=True)
+    assets = dict(assets or {})
 
-    # 1. Extract visual assets from video (if source video available)
-    assets: dict[str, Path] = {}
-    video_size: tuple[int, int] | None = None
-    if video_path and video_path.is_file():
-        log.info("Extracting visual assets from video...")
-        from v2g.video.asset_extractor import extract_assets, probe_video_size
-
-        video_size = probe_video_size(video_path)
-        assets_dir = project_root / "assets"
-        assets = extract_assets(video_path, design, assets_dir)
-        log.info("Extracted %d asset(s)", len(assets))
-
-        # Optional: restyle extracted assets with the local image-gen provider
-        _restyle_assets(design, assets, instruct)
-
-    # 2. Generate ALL scripts via LLM
+    # 1. Generate ALL scripts via LLM
     log.info("Generating GDScript files via LLM...")
     scripts = _generate_scripts(design)
     scripts = _ensure_essentials(scripts, design, assets)
     log.info("Generated %d script(s): %s", len(scripts), ", ".join(sorted(scripts)))
 
-    # 3. project.godot — window aspect follows the source video
+    # 2. project.godot — window aspect follows the source video
     (project_root / "project.godot").write_text(
         T.project_dot_godot(design.title, *T.viewport_for(video_size)),
         encoding="utf-8",
     )
 
-    # 4. main.tscn — visual-novel root (vn_manager + GameManager)
+    # 3. main.tscn — visual-novel root (vn_manager + GameManager)
     (project_root / "main.tscn").write_text(T.main_scene(design, scripts), encoding="utf-8")
 
-    # 5. Write all scripts
+    # 4. Write all scripts
     for fname, source in scripts.items():
         (project_root / fname).write_text(source, encoding="utf-8")
 
-    # 6. Game design metadata
+    # 5. Game design metadata
     (project_root / "game_design.json").write_text(
         design.model_dump_json(indent=2), encoding="utf-8"
     )
 
-    # 7. Compile-check every script — the boot below never parses scripts the
+    # 6. Compile-check every script — the boot below never parses scripts the
     # main scene doesn't reference — repair/fallback so parse errors never ship
     scripts = _validate_scripts(project_root, design, scripts)
 
-    # 8. Import assets and boot once — errors surface at generation time
+    # 7. Import assets and boot once — errors surface at generation time
     _finalize_with_godot(project_root)
 
     return project_root

@@ -448,13 +448,13 @@ def analysis_key(
     transcript: list[TranscriptLine],
     *,
     detailed: bool,
-    instruct: str | None,
 ) -> str:
     """Coarse key for a whole analysis result (run-local checkpoint).
 
-    Covers everything that shapes the design: source file identity, mode
-    (system prompt + token budget), extraction settings, model, style
-    instruction, and the transcript.
+    Covers everything that shapes the **stage 1** design: source file identity,
+    mode (system prompt + token budget), extraction settings, model and the
+    transcript. Deliberately theme-free — the theme enters in stage 2, so every
+    themed variant of one video reuses the same analysis checkpoint.
     """
     import hashlib
     import json as _json
@@ -468,7 +468,6 @@ def analysis_key(
             "system": _SYSTEM_VIDEO if detailed else _SYSTEM_FRAMES,
             "max_tokens": 16384 if detailed else 8192,
             "detailed": detailed,
-            "instruct": _theme_block(instruct) if instruct else "",
             "transcript": format_transcript(transcript),
             "extract": {
                 "frame_interval": settings.frame_interval,
@@ -538,20 +537,77 @@ def _theme_block(instruct: str) -> str:
     )
 
 
-def _inject_instruct(user_msg: str, instruct: str | None) -> str:
-    """Append the theme instruction to the user message if provided."""
-    if not instruct:
-        return user_msg
-    return f"{user_msg}\n\n{_theme_block(instruct)}"
+_NO_THEME = (
+    "No theme was given. Keep the world and the story recognisable, but re-skin the "
+    "presentation so the result does not look like the source video — a different "
+    "palette, rendering style and lighting is enough."
+)
+
+_REWRITE_SYSTEM = (
+    "You re-skin a game design for a new style without touching its story. "
+    "Answer only with the complete GameDesign JSON document."
+)
+
+
+def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
+    """Stage 2 (text half): re-skin the design's presentation — theme or not.
+
+    Runs after analysis **and** asset extraction, so nothing theme-shaped ever
+    reaches stage 1: one source video → one faithful analysis → one extraction,
+    and each theme is just another re-skin of that.
+
+    Identity is frozen, not merely requested: character / object / scene names
+    and ``face_id`` are what stage 1's asset keys, speaker→portrait mapping and
+    scene keys are built from, and ``dialogue_samples`` is transcribed from the
+    source video — a rewrite that renames or drops any of them would orphan the
+    sprites just extracted, so those are restored/validated here.
+
+    A failed or identity-breaking re-skin returns the design unchanged: it can
+    never fail a run.
+    """
+    user = (
+        "Re-skin this GameDesign for the style below.\n"
+        "REWRITE — presentation only: title, summary, narrative, style, atmosphere, "
+        "character visual/personas, object visual/spatial, scene layout/visual_theme.\n"
+        "KEEP UNCHANGED — identity and gameplay: character names and face_id, object "
+        "names, scene names, roles, mechanics, controls, physics, progression, scene "
+        "goals/hazards/triggers, and every dialogue_samples entry (transcribed from the "
+        "source video).\n\n"
+        f"{_theme_block(instruct or _NO_THEME)}\n\n"
+        "GameDesign JSON:\n" + design.model_dump_json(indent=2)
+    )
+    try:
+        rewritten = _request_design(_REWRITE_SYSTEM, [user], max_tokens=16384, temperature=0.3)
+    except Exception as e:  # noqa: BLE001 — a failed re-skin must never fail the run
+        log.warning("Design re-skin failed (%s) — keeping the source-faithful design", e)
+        return design
+    rewritten.dialogue_samples = design.dialogue_samples  # transcript authority, not the model's
+    for label, old, new in (
+        ("character", {c.name for c in design.characters}, {c.name for c in rewritten.characters}),
+        ("object", {o.name for o in design.objects}, {o.name for o in rewritten.objects}),
+        ("scene", {s.name for s in design.scenes}, {s.name for s in rewritten.scenes}),
+    ):
+        missing = sorted(old - new)
+        if missing:
+            log.warning(
+                "Design re-skin dropped %s id(s) %s — keeping the source-faithful design",
+                label,
+                ", ".join(missing)[:120],
+            )
+            return design
+    return rewritten
 
 
 def analyze(
     frames: list[Path],
     *,
-    instruct: str | None = None,
     transcript: str | None = None,
 ) -> GameDesign:
-    """Analyze video keyframes → GameDesign (fast mode)."""
+    """Stage 1 (fast mode): analyze keyframes of the ORIGINAL video → GameDesign.
+
+    Always source-faithful: the theme is applied later, in stage 2, so this
+    analysis is shared by every themed variant of the same video.
+    """
     user_msg = (
         "Here are key frames extracted from a video. "
         "Analyze every frame in detail: identify characters, environments, narrative beats, "
@@ -559,7 +615,7 @@ def analyze(
         "that would allow a developer to recreate this content as a playable game.\n"
         + _transcript_note(transcript)
     )
-    parts: list[str | Path] = [_inject_instruct(user_msg, instruct)]
+    parts: list[str | Path] = [user_msg]
     parts.extend(frames)
     # Fast-mode budget must stay aligned with analysis_key's max_tokens field.
     return _request_design(_SYSTEM_FRAMES, parts, max_tokens=8192)
@@ -568,14 +624,14 @@ def analyze(
 def analyze_video(
     video_path: Path,
     *,
-    instruct: str | None = None,
     transcript: str | None = None,
 ) -> GameDesign:
-    """Analyze a full video file → GameDesign (detailed mode).
+    """Stage 1 (detailed mode): analyze the ORIGINAL video file → GameDesign.
 
     Sends the video directly to a model with video understanding support.
     Produces the most faithful analysis with full narrative, character detail,
-    scene-by-scene breakdown, and dialogue samples.
+    scene-by-scene breakdown, and dialogue samples. Source-faithful by design —
+    any theme is applied afterwards (stage 2), never here.
     """
     user_msg = (
         "Here is a video. Watch it carefully — multiple times if needed. "
@@ -584,14 +640,13 @@ def analyze_video(
         "content with enough fidelity for a near 1:1 recreation as a playable game.\n"
         + _transcript_note(transcript)
     )
-    parts: list[str | Path] = [_inject_instruct(user_msg, instruct), video_path]
+    parts: list[str | Path] = [user_msg, video_path]
     return _request_design(_SYSTEM_VIDEO, parts, max_tokens=16384, temperature=0.3)
 
 
 def analyze_video_chunked(
     segments: list[Path],
     *,
-    instruct: str | None = None,
     chunk_label: str = "",
     transcript: list[TranscriptLine] | None = None,
 ) -> GameDesign:
@@ -602,7 +657,6 @@ def analyze_video_chunked(
 
     Args:
         segments: Ordered list of video segment file paths.
-        instruct: Optional style instruction.
         chunk_label: Prefix for progress messages (e.g. "1/3").
         transcript: Full-source transcript; each segment only receives the
             lines whose timestamps fall inside its window.
@@ -610,7 +664,6 @@ def analyze_video_chunked(
     if len(segments) == 1:
         return analyze_video(
             segments[0],
-            instruct=instruct,
             transcript=(format_transcript(transcript) if transcript else None),
         )
 
@@ -642,7 +695,7 @@ def analyze_video_chunked(
                 or None
             )
         try:
-            d = analyze_video(seg, instruct=instruct, transcript=seg_transcript)
+            d = analyze_video(seg, transcript=seg_transcript)
             designs.append(d)
             log.info(
                 "  Segment %s: '%s' — %d chars, %d scenes",

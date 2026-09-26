@@ -8,15 +8,17 @@ from rich.panel import Panel
 
 from v2g import runlog
 from v2g.config import settings
-from v2g.godot.generator import generate
+from v2g.godot.generator import generate, restyle_assets
 from v2g.llm.analyzer import (
     GameDesign,
     analysis_key,
     analyze,
     analyze_video_chunked,
     load_checkpoint,
+    rewrite_design,
     save_checkpoint,
 )
+from v2g.video.asset_extractor import extract_assets, probe_video_size
 from v2g.video.dialogue import TranscriptLine, extract_dialogue, format_transcript
 from v2g.video.extractor import extract, prepare_video_for_upload, resolve_source, split_video
 
@@ -24,10 +26,9 @@ console = Console()
 log = logging.getLogger(__name__)
 
 
-def _print_design(design: GameDesign, instruct: str | None = None) -> None:
+def _print_design(design: GameDesign) -> None:
     physics = f"\nPhysics: {design.physics}" if design.physics else ""
     progression = f"\nProgression: {design.progression}" if design.progression else ""
-    instruct_note = f"\nStyle: {instruct}" if instruct else ""
     narrative_brief = ""
     if design.narrative:
         # Show first 200 chars of narrative
@@ -39,7 +40,7 @@ def _print_design(design: GameDesign, instruct: str | None = None) -> None:
             f"Genre: {design.genre}\n"
             f"Mechanics: {', '.join(design.mechanics)}\n"
             f"Objects: {len(design.objects)}  |  Characters: {len(design.characters)}  |  Scenes: {len(design.scenes)}"
-            f"{physics}{progression}{instruct_note}{narrative_brief}\n\n"
+            f"{physics}{progression}{narrative_brief}\n\n"
             f"{design.summary}",
             title="🎮 Game Design",
             border_style="green",
@@ -53,9 +54,12 @@ def _analyze(
     transcript_lines: list[TranscriptLine],
     *,
     detailed: bool,
-    instruct: str | None,
 ) -> GameDesign:
-    """Analyze layer: prepared source → GameDesign (checkpoint handled by caller)."""
+    """Stage 1 (analysis): prepared source → source-faithful GameDesign.
+
+    Deliberately theme-free: the theme enters in stage 2, after extraction, so
+    the same analysis serves every themed variant of one video.
+    """
     if detailed:
         # ── Detailed mode: send full video to LLM ────────────────────────
         from v2g.video.extractor import _get_duration
@@ -73,7 +77,7 @@ def _analyze(
             console.print(f"  Split into {len(segments)} segments")
 
             console.print("[bold cyan]▶ Analyzing video segments with LLM (detailed)...[/]")
-            design = analyze_video_chunked(segments, instruct=instruct, transcript=transcript_lines)
+            design = analyze_video_chunked(segments, transcript=transcript_lines)
         else:
             # Short enough: one analysis; split further only if a piece still
             # exceeds the size cap after its single compression pass.
@@ -83,7 +87,7 @@ def _analyze(
             console.print(f"  Video ready ({len(uploads)} file(s), {total_mb:.1f} MB)")
 
             console.print("[bold cyan]▶ Analyzing video with LLM (detailed)...[/]")
-            design = analyze_video_chunked(uploads, instruct=instruct, transcript=transcript_lines)
+            design = analyze_video_chunked(uploads, transcript=transcript_lines)
     else:
         # ── Fast mode: extract keyframes ──────────────────────────────────
         console.print("[bold cyan]▶ Extracting frames...[/]")
@@ -93,7 +97,6 @@ def _analyze(
         console.print("[bold cyan]▶ Analyzing video with LLM...[/]")
         design = analyze(
             frames,
-            instruct=instruct,
             transcript=format_transcript(transcript_lines) or None,
         )
     return design
@@ -137,20 +140,18 @@ def run(
         console.print("[yellow]▶ No subtitles found — source-language lines will be left empty[/]")
         log.info("Transcript: none found — source-language lines will be left empty")
 
-    # ── Analyze layer: checkpoint first, LLM only on a miss ─────────────────
-    key = analysis_key(source_video, transcript_lines, detailed=detailed, instruct=instruct)
+    # ── Stage 1: analyze the original video, then extract its assets ────────
+    key = analysis_key(source_video, transcript_lines, detailed=detailed)
     design = load_checkpoint(run_dir, key)
     if design is not None:
         console.print("[bold cyan]▶ Analysis checkpoint:[/] design.json reused, LLM skipped")
         log.info("Analysis checkpoint hit (key=%.12s) — LLM skipped", key)
     else:
-        design = _analyze(
-            source_video, work, transcript_lines, detailed=detailed, instruct=instruct
-        )
+        design = _analyze(source_video, work, transcript_lines, detailed=detailed)
         save_checkpoint(run_dir, design, key)
         log.info("Analysis complete; checkpoint saved (key=%.12s)", key)
 
-    _print_design(design, instruct)
+    _print_design(design)
     log.info(
         "Design analyzed: title=%r genre=%r characters=%d objects=%d scenes=%d dialogue=%d",
         design.title,
@@ -161,9 +162,23 @@ def run(
         len(design.dialogue_samples),
     )
 
-    # ── Generate Godot project (into the run directory) ──────────────────────
+    console.print("[bold cyan]▶ Extracting assets from the original video...[/]")
+    assets = extract_assets(source_video, design, run_dir / "assets")
+    video_size = probe_video_size(source_video)
+    console.print(f"  {len(assets)} asset(s)")
+    log.log(runlog.NOTICE, "Stage 1: analyzed the original and extracted %d asset(s)", len(assets))
+
+    # ── Stage 2: re-skin the design and redraw the art — theme or not ───────
+    console.print(
+        f"[bold cyan]▶ Re-skinning{' for theme: ' + instruct if instruct else ' (no theme — unlike the source)'}...[/]"
+    )
+    design = rewrite_design(design, instruct)
+    restyle_assets(design, assets, instruct)
+    log.log(runlog.NOTICE, "Stage 2: re-skin + redraw done (style: %.80s)", design.style or "-")
+
+    # ── Stage 3: generate the game flow and copy ────────────────────────────
     console.print("[bold cyan]▶ Generating Godot project...[/]")
-    project_path = generate(design, run_dir, video_path=source_video, instruct=instruct)
+    project_path = generate(design, run_dir, assets=assets, video_size=video_size)
     console.print(
         f"  [bold green]✓[/] Project created at [link=file://{project_path}]{project_path}[/link]"
     )
