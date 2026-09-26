@@ -50,10 +50,15 @@ Two analysis modes (both part of stage 1):
    dialogue, then cuts the assets out of the original video.
 2. **Rewrite + redraw** — re-skins the design's presentation with the theme you
    passed (`-i`) or, with none, simply so it no longer looks like the source;
-   names, ids and dialogue stay fixed. The assets are then redrawn beside their
+   characters, objects and scenes get new names and every background is a
+   different place, while `face_id`, gameplay and the verbatim dialogue stay
+   fixed — extracted sprites follow the renames (asset keys and speaker labels
+   are re-keyed). The assets are then redrawn beside their
    frames when an image-gen backend is configured (skip is always reported);
    each brief opens and closes with the theme and carries the re-skinned
-   design's art style, so the redraw follows `-i` instead of the source frame.
+   design's art style, so the redraw follows `-i` instead of the source frame —
+   and the source-referenced candidate is text-led: the frame enters as a
+   caption and stays a reference, never a template.
 3. **Generate** — scaffolds a visual-novel Godot 4.x project (`project.godot`,
    `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`),
    compile-checks every script (one LLM repair pass, then fallback, on parse

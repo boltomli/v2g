@@ -14,6 +14,7 @@ from v2g.llm.analyzer import (
     analysis_key,
     analyze,
     analyze_video_chunked,
+    asset_key_renames,
     load_checkpoint,
     rewrite_design,
     save_checkpoint,
@@ -172,7 +173,17 @@ def run(
     console.print(
         f"[bold cyan]▶ Re-skinning{' for theme: ' + instruct if instruct else ' (no theme — unlike the source)'}...[/]"
     )
+    source_design = design
     design = rewrite_design(design, instruct)
+    key_moves = asset_key_renames(source_design, design)
+    if key_moves:
+        # Stage 1 cut frames under the source names — follow the rename so
+        # portraits, scene stills and redraw targets keep resolving.
+        assets = {key_moves.get(k, k): path for k, path in assets.items()}
+        log.info(
+            "Stage 2 renamed asset keys: %s",
+            ", ".join(f"{old}→{new}" for old, new in key_moves.items())[:200],
+        )
     restyle_assets(design, assets, instruct)
     log.log(runlog.NOTICE, "Stage 2: re-skin + redraw done (style: %.80s)", design.style or "-")
 

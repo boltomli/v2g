@@ -18,6 +18,8 @@ from v2g.llm import image_gen
 from v2g.llm.analyzer import Character, GameDesign, GameObject, SceneDesign
 from v2g.llm.client import ChatResult
 
+_real_frame_caption = G._frame_caption  # captured before the fixture stubs it
+
 BLUE = (0, 0, 255)  # source frames
 NAVY = (0, 0, 128)  # reference candidate — barely moved from the source
 GREEN = (0, 128, 0)  # text-only candidate — clearly changed
@@ -104,13 +106,15 @@ class _Chat:
 
 @pytest.fixture(autouse=True)
 def judge(monkeypatch) -> _Chat:
-    """No real LLM in tests: default verdict is unusable → difference fallback.
+    """No real LLM in tests: default verdict is unusable → difference fallback,
+    and the frame caption (i2t2i) says nothing — `chat` carries both seams.
 
     A/B is switched on here so the two-candidate behaviour is what the tests
     exercise; a test that wants a single candidate sets ``imagegen_ab`` itself.
     """
     stub = _Chat()
     monkeypatch.setattr(G, "chat", stub)
+    monkeypatch.setattr(G, "_frame_caption", lambda _path: "")
     monkeypatch.setattr(G.settings, "imagegen_ab", True)
     return stub
 
@@ -159,7 +163,8 @@ def test_restyle_draws_both_candidates_with_kind_specific_briefs(monkeypatch, tm
 def test_the_theme_bookends_the_brief_and_the_design_style_rides_along(monkeypatch, tmp_path):
     """A theme named once at the top loses to the source frame fed in as
     visual context — the brief restates it as a closing mandate and carries
-    the stage-2 design's own art style too."""
+    the stage-2 design's own art style too. The ref candidate additionally
+    closes on the reference note: text last, frame demoted."""
     provider = _Recording()
     monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
     design = _design()
@@ -167,11 +172,50 @@ def test_the_theme_bookends_the_brief_and_the_design_style_rides_along(monkeypat
 
     G.restyle_assets(design, _assets(tmp_path), "vampire style")
 
-    for _, prompt, _ in provider.calls:
+    for _, prompt, condition in provider.calls:
         assert "ART STYLE: gothic pixel art, moonlit blues" in prompt
-        mandate = prompt.split("\n\n")[-1]
-        assert mandate.startswith("THEME MANDATE: vampire style")
-        assert "the theme wins" in mandate
+        assert "THEME MANDATE: vampire style" in prompt
+        last = prompt.split("\n\n")[-1]
+        if condition:  # ref candidate: the reference note is the final word
+            assert last.startswith("SOURCE FRAME — REFERENCE ONLY")
+        else:
+            assert last.startswith("THEME MANDATE: vampire style")
+            assert "the theme wins" in last
+
+
+def test_the_ref_candidate_is_text_led_with_the_frame_as_reference(monkeypatch, tmp_path, judge):
+    """i2t2i: the ref brief binds the text (brief + frame caption) and demotes
+    the attached frame to a reference; the pure t2i candidate carries no frame
+    talk at all."""
+    provider = _Recording()
+    monkeypatch.setattr(image_gen, "get_provider", lambda: provider)
+    monkeypatch.setattr(G, "_frame_caption", lambda _path: "a bride in a white gown")
+
+    G.restyle_assets(_design(), _assets(tmp_path), "vampire style")
+
+    seen_ref = seen_text = False
+    for _, prompt, condition in provider.calls:
+        if condition:
+            seen_ref = True
+            assert prompt.startswith("Redraw in this theme: vampire style")  # text opens
+            assert "REFERENCE ONLY" in prompt and "NEVER A TEMPLATE" in prompt
+            assert "Every line of the brief above is binding" in prompt
+            assert "What the frame shows: a bride in a white gown." in prompt
+        else:
+            seen_text = True
+            assert "REFERENCE ONLY" not in prompt  # no frame is attached to it
+    assert seen_ref and seen_text
+
+
+def test_frame_caption_is_the_source_frame_as_text(tmp_path, judge):
+    """The frame enters the brief as a sentence — and an outage degrades to
+    no caption, never to a failed redraw."""
+    judge.text = "a bride stands alone in a moonlit courtyard"
+
+    assert _real_frame_caption(tmp_path / "background.png") == judge.text
+
+    judge.raises = True
+    assert _real_frame_caption(tmp_path / "background.png") == ""
 
 
 @pytest.mark.parametrize(("pick", "color"), [("ref", NAVY), ("text", GREEN)])

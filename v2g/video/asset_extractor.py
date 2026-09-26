@@ -253,9 +253,7 @@ def _content_rect(im) -> tuple[int, int, int, int] | None:
         best_start = best_len = start = size = 0
         for i in range(length):
             strip = (
-                gray.crop((0, i, width, i + 1))
-                if vertical
-                else gray.crop((i, 0, i + 1, height))
+                gray.crop((0, i, width, i + 1)) if vertical else gray.crop((i, 0, i + 1, height))
             )
             hist = strip.histogram()
             total = sum(hist) or 1

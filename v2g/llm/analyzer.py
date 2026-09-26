@@ -531,6 +531,94 @@ def _transcript_note(transcript: str | None) -> str:
     )
 
 
+def safe_name(name: str) -> str:
+    """Asset-key / filename form of an entity name.
+
+    One canonical spelling of the rule ``v2g.video.asset_extractor`` builds
+    keys with (``characters/<safe>`` …) and ``v2g.godot.templates`` looks
+    them up with — stage-2 renames must go through the same function or the
+    extracted frames stop resolving.
+    """
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_").lower()
+
+
+def match_character(speaker: str, characters: list[Character]) -> int | None:
+    """Index of the character a dialogue speaker refers to, or None.
+
+    Speakers come from the transcript: aliases joined by ``/``, substrings
+    and overlapping name tokens all count. Narration and off-screen voices
+    that match nobody return None.
+    """
+    s = safe_name(speaker)
+    if not s:
+        return None
+    for i, c in enumerate(characters):
+        cn = safe_name(c.name)
+        if s == cn or s in cn or cn in s:
+            return i
+    s_tokens = {t for t in s.split("_") if t}
+    best: int | None = None
+    best_score = 0.0
+    for i, c in enumerate(characters):
+        c_tokens = {t for t in safe_name(c.name).split("_") if t}
+        if not c_tokens or not s_tokens:
+            continue
+        score = len(s_tokens & c_tokens) / len(s_tokens | c_tokens)
+        if score > best_score:
+            best, best_score = i, score
+    return best if best_score >= 0.5 else None
+
+
+def _reorder(before: list, after: list, *, by_face: bool = False) -> list:
+    """Put the rewritten entity list back into the source list's order.
+
+    ``face_id`` anchors characters when it survived on both sides (the model
+    may reorder the cast); everything unpaired falls back to position. Counts
+    are validated equal by the caller first.
+    """
+    pairs: dict[int, int] = {}
+    if by_face:
+        seen: dict[str, int] = {}
+        for j, e in enumerate(after):
+            fid = str(getattr(e, "face_id", "")).lower().strip()
+            if fid and fid not in seen:
+                seen[fid] = j
+        for i, e in enumerate(before):
+            fid = str(getattr(e, "face_id", "")).lower().strip()
+            if fid and fid in seen and seen[fid] not in pairs.values():
+                pairs[i] = seen[fid]
+    free = [j for j in range(len(after)) if j not in pairs.values()]
+    pos = 0
+    for i in range(len(before)):
+        if i not in pairs:
+            pairs[i] = free[pos]
+            pos += 1
+    return [after[pairs[i]] for i in range(len(before))]
+
+
+def asset_key_renames(before: GameDesign, after: GameDesign) -> dict[str, str]:
+    """Stage-2 renames as asset-key moves: ``characters/hero`` → ``characters/knight``.
+
+    Stage 1 extracted frames under the SOURCE names; the pipeline applies
+    this map right after the rewrite so portraits, scene stills and redraw
+    targets keep resolving. Unchanged names are omitted; mismatched lengths
+    (a design that was never renamed) yield an empty map.
+    """
+    renames: dict[str, str] = {}
+    for kind, olds, news in (
+        ("characters", before.characters, after.characters),
+        ("objects", before.objects, after.objects),
+        ("scenes", before.scenes, after.scenes),
+    ):
+        if len(olds) != len(news):
+            return {}
+        for old, new in zip(olds, news):
+            old_key, new_key = safe_name(old.name), safe_name(new.name)
+            if old_key != new_key:
+                renames[f"{kind}/{old_key}"] = f"{kind}/{new_key}"
+    return renames
+
+
 def _theme_block(instruct: str) -> str:
     """The THEME INSTRUCTION block appended to every analysis message.
 
@@ -545,8 +633,9 @@ def _theme_block(instruct: str) -> str:
         f"motivations; rewrite every visual field to fit the theme above:\n"
         f"- characters: new names, faces, outfits, hairstyles, palettes and signature "
         f"poses/actions — no character keeps the source's look\n"
-        f"- objects: re-invented shape, material and colors\n"
-        f"- scenes: new layout, palette, lighting and atmosphere\n"
+        f"- objects: new names, re-invented shape, material and colors\n"
+        f"- scenes: new location names — every background becomes a different place, "
+        f"with its own layout, palette, lighting and atmosphere\n"
         f"- style and atmosphere: rewritten around the theme\n"
         f"The FAITHFULNESS RULES in the system prompt describe the SOURCE analysis only; "
         f"wherever the theme and the source disagree, the theme wins.\n"
@@ -573,23 +662,31 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
     reaches stage 1: one source video → one faithful analysis → one extraction,
     and each theme is just another re-skin of that.
 
-    Identity is frozen, not merely requested: character / object / scene names
-    and ``face_id`` are what stage 1's asset keys, speaker→portrait mapping and
-    scene keys are built from, and ``dialogue_samples`` is transcribed from the
-    source video — a rewrite that renames or drops any of them would orphan the
-    sprites just extracted, so those are restored/validated here.
+    Names and backgrounds are re-skinned like everything else — the cast keeps
+    its size and ``face_id``, not its source names. Because stage 1's asset
+    keys and the speaker→portrait mapping were built from the SOURCE names,
+    the result is normalised after the call: each entity list is put back into
+    source order (``face_id`` anchors characters, position settles the rest),
+    dialogue speakers are re-pointed at the new names, scene transitions are
+    re-keyed, and :func:`asset_key_renames` lets the pipeline follow the
+    renamed asset keys. ``dialogue_samples`` lines stay transcribed from the
+    source video — only their speaker labels move.
 
-    A failed or identity-breaking re-skin returns the design unchanged: it can
-    never fail a run.
+    A structurally different re-skin (a dropped, added or duplicated identity)
+    and a failed call both return the design unchanged: it can never fail a
+    run.
     """
     user = (
         "Re-skin this GameDesign for the style below.\n"
-        "REWRITE — presentation only: title, summary, narrative, style, atmosphere, "
-        "character visual/personas, object visual/spatial, scene layout/visual_theme.\n"
-        "KEEP UNCHANGED — identity and gameplay: character names and face_id, object "
-        "names, scene names, roles, mechanics, controls, physics, progression, scene "
-        "goals/hazards/triggers, and every dialogue_samples entry (transcribed from the "
-        "source video).\n\n"
+        "REWRITE — presentation: title, summary, narrative, style, atmosphere, "
+        "character visual/personas, object visual/spatial, scene layout/visual_theme — "
+        "and NAMES: give every character, object and scene a new name that fits the "
+        "style, redesign every scene/background as a different place, and keep each "
+        "list the same length in the same order (one renamed entity per source "
+        "entity).\n"
+        "KEEP UNCHANGED — gameplay and identity anchors: face_id, roles, mechanics, "
+        "controls, physics, progression, scene goals/hazards/triggers, and every "
+        "dialogue_samples entry (transcribed from the source video).\n\n"
         f"{_theme_block(instruct or _NO_THEME)}\n\n"
         "GameDesign JSON:\n" + design.model_dump_json(indent=2)
     )
@@ -599,19 +696,51 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
         log.warning("Design re-skin failed (%s) — keeping the source-faithful design", e)
         return design
     rewritten.dialogue_samples = design.dialogue_samples  # transcript authority, not the model's
-    for label, old, new in (
-        ("character", {c.name for c in design.characters}, {c.name for c in rewritten.characters}),
-        ("object", {o.name for o in design.objects}, {o.name for o in rewritten.objects}),
-        ("scene", {s.name for s in design.scenes}, {s.name for s in rewritten.scenes}),
+
+    # One-to-one structure: renames ride along, but a collapse/merge/split is
+    # a failed re-skin — names are keys downstream, duplicates would collide.
+    for label, before, after in (
+        ("character", design.characters, rewritten.characters),
+        ("object", design.objects, rewritten.objects),
+        ("scene", design.scenes, rewritten.scenes),
     ):
-        missing = sorted(old - new)
-        if missing:
+        if len(before) != len(after):
             log.warning(
-                "Design re-skin dropped %s id(s) %s — keeping the source-faithful design",
+                "Design re-skin reshaped the %s list (%d → %d) — keeping the "
+                "source-faithful design",
                 label,
-                ", ".join(missing)[:120],
+                len(before),
+                len(after),
             )
             return design
+        keys = [safe_name(e.name) for e in after]
+        if len(set(keys)) != len(keys):
+            log.warning(
+                "Design re-skin produced duplicate %s name(s) — keeping the source-faithful design",
+                label,
+            )
+            return design
+
+    # Back into source order, so asset keys, portraits and scene flow line up
+    # with what stage 1 extracted.
+    rewritten.characters = _reorder(design.characters, rewritten.characters, by_face=True)
+    rewritten.objects = _reorder(design.objects, rewritten.objects)
+    rewritten.scenes = _reorder(design.scenes, rewritten.scenes)
+
+    # Stage-1 speakers name the SOURCE cast — follow the rename so the
+    # speaker→portrait mapping keeps its target (narration etc. stay as-is).
+    for ds in rewritten.dialogue_samples:
+        idx = match_character(ds.speaker, design.characters)
+        if idx is not None:
+            ds.speaker = rewritten.characters[idx].name
+
+    # Transitions carry scene names verbatim — re-key them too.
+    scene_names = {
+        safe_name(old.name): new.name for old, new in zip(design.scenes, rewritten.scenes)
+    }
+    for t in rewritten.scene_transitions:
+        t.source = scene_names.get(safe_name(t.source), t.source)
+        t.destination = scene_names.get(safe_name(t.destination), t.destination)
     return rewritten
 
 

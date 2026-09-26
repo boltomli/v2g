@@ -11,7 +11,9 @@ project, in **three stages that only ever flow forwards**:
    assets, whatever theme is asked for later.
 2. **Rewrite and redraw — with the given theme, or none** — the design's
    presentation is re-skinned (with no theme it only has to differ from the
-   source video) and the assets are redrawn beside their frames.
+   source video): names and backgrounds are re-invented too, with asset keys
+   and dialogue speakers re-keyed so the extracted frames keep resolving. The
+   assets are redrawn beside their frames.
 3. **Generate the game flow and copy** — the Godot project: script flow,
    dialogue, choices, HUD. Voice-over and background music are **planned but
    not implemented yet**.
@@ -39,7 +41,8 @@ Video (file / URL)
                                      ▼
 ┌ Stage 2 ─ rewrite + redraw (theme given, or none) ─────────────────────────┐
 │  rewrite_design()  text re-skin: the theme when there is one, otherwise    │
-│                    "unlike the source"; names, ids and dialogue frozen     │
+│                    "unlike the source"; names/backgrounds renamed with     │
+│                    keys + speakers re-keyed, face_id and dialogue frozen   │
 │  restyle_assets()  per-kind redraw beside each frame (image-gen provider;  │
 │                    -i supplies the theme, no -i = art only has to differ)  │
 └────────────────────────────────────┬───────────────────────────────────────┘
@@ -360,15 +363,20 @@ Stage 2 has two halves and both run **after** stage 1, whatever the theme:
    text-only re-skin of the design, one cached chat call. With
    **`-i/--instruct <style>`** the style becomes a **THEME INSTRUCTION**
    demanding a full redesign: only story structure, beat order and character
-   motivations survive, every visual field is rewritten to the theme, and the
-   theme wins wherever it disagrees with the source video. **Without a theme**
-   the same rewrite runs on a weaker brief — keep the world recognisable, but
-   the result must not look like the source video. Identity is frozen either
-   way: character / object / scene names, `face_id` and every
-   `dialogue_samples` entry are validated (and dialogue restored) after the
-   call, because stage 1's asset keys, speaker→portrait mapping and scene keys
-   are built from them — a rewrite that renames or drops an id is discarded
-   and the faithful design ships. A failed rewrite does the same.
+   motivations survive, every visual field — names and backgrounds included —
+   is rewritten to the theme, and the theme wins wherever it disagrees with
+   the source video. **Without a theme** the same rewrite runs on a weaker
+   brief — keep the world recognisable, but the result must not look like the
+   source video. Renames are the contract, not an accident: the result is
+   normalised against the source design after the call — each entity list put
+   back into source order (`face_id` anchors characters, position settles the
+   rest), dialogue speakers re-pointed at the new names so speaker→portrait
+   keeps its target, scene transitions re-keyed, `dialogue_samples` lines
+   restored from the transcript — and the pipeline applies
+   `asset_key_renames()` so stage 1's extracted sprites keep resolving under
+   the new names. A structurally different re-skin (dropped, added or
+   duplicated identity) and a failed rewrite both ship the faithful design
+   instead — it can never fail a run.
 2. **`restyle_assets(design, assets, instruct)`** (`v2g/godot/generator.py`)
    — the image half: each extracted asset is re-drawn in that style by a
    **local Qwen-Image-2.1** model instead of shipping the raw video frame.
@@ -384,7 +392,13 @@ design's `style` as `ART STYLE:`, the kind directive, the subject, and a
 closing `THEME MANDATE:` that restates the theme (the reference candidate is
 fed the source frame as visual context, so a theme named only once at the top
 loses to the video's own palette). The SUBJECT (the stage-2 design) defines
-what the thing IS; the source frame only marks what must not be copied:
+what the thing IS; the source frame only marks what must not be copied.
+The **reference candidate's** brief is text-led on top of that
+(`_reference_prompt`): the source frame is first captioned into a sentence by
+a vision call (`_frame_caption` — an outage just drops the sentence) and the
+closing note binds every line of the brief while demoting the attached frame
+to "reference only, never a template", so the pixels can't out-shout the
+text (i2t2i: image → text → image, image as reference):
 - **characters** → drawn fresh as a square half-body portrait (head and torso),
   isolated on a plain background; outfit/hairstyle/colors follow the SUBJECT
   while framing, stance and background differ from the source frame

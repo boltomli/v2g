@@ -16,15 +16,11 @@ import json
 import logging
 from pathlib import Path
 
-from v2g.llm.analyzer import Character, GameDesign
+from v2g.llm.analyzer import GameDesign, match_character, safe_name
 
 log = logging.getLogger(__name__)
 
-# ── Naming helpers (must match v2g.video.asset_extractor conventions) ────────
-
-
-def _safe(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_").lower()
+# ── Asset resolution (keys come from v2g.video.asset_extractor via safe_name) ─
 
 
 def _res(assets: dict[str, Path] | None, key: str) -> str | None:
@@ -99,28 +95,6 @@ _uid.counter = 0
 # ── Story building (GameDesign → VN steps) ──────────────────────────────────
 
 
-def _match_character(speaker: str, characters: list[Character]) -> str | None:
-    """Map a dialogue speaker to a character's asset key (safe name)."""
-    s = _safe(speaker)
-    if not s:
-        return None
-    for c in characters:
-        cn = _safe(c.name)
-        if s == cn or s in cn or cn in s:
-            return cn
-    s_tokens = {t for t in s.split("_") if t}
-    best: str | None = None
-    best_score = 0.0
-    for c in characters:
-        c_tokens = {t for t in _safe(c.name).split("_") if t}
-        if not c_tokens or not s_tokens:
-            continue
-        score = len(s_tokens & c_tokens) / len(s_tokens | c_tokens)
-        if score > best_score:
-            best, best_score = _safe(c.name), score
-    return best if best_score >= 0.5 else None
-
-
 def _build_story(
     design: GameDesign,
     assets: dict[str, Path] | None = None,
@@ -141,17 +115,17 @@ def _build_story(
         bg_order.append("background")
         tex_map["background"] = bg
     for scene in design.scenes:
-        sid = f"scene_{_safe(scene.name)}"
-        res = _res(assets, f"scenes/{_safe(scene.name)}")
+        sid = f"scene_{safe_name(scene.name)}"
+        res = _res(assets, f"scenes/{safe_name(scene.name)}")
         if res:
             bg_order.append(sid)
             tex_map[sid] = res
 
     portrait_map: dict[str, str] = {}
     for c in design.characters:
-        res = _res(assets, f"characters/{_safe(c.name)}")
+        res = _res(assets, f"characters/{safe_name(c.name)}")
         if res:
-            portrait_map[_safe(c.name)] = res
+            portrait_map[safe_name(c.name)] = res
 
     speaker_names: dict[str, str] = {"": "旁白"}
     steps: list[dict] = []
@@ -169,7 +143,10 @@ def _build_story(
             step["bg"] = bg_order[min(i * len(bg_order) // max(n, 1), len(bg_order) - 1)]
         is_dialogue = bool(ds.line.strip()) and bool(ds.speaker.strip())
         if is_dialogue:
-            key = _match_character(ds.speaker, design.characters) or _safe(ds.speaker)
+            idx = match_character(ds.speaker, design.characters)
+            key = (
+                safe_name(design.characters[idx].name) if idx is not None else safe_name(ds.speaker)
+            )
             step["speaker"] = key
             speaker_names.setdefault(key, ds.speaker)
             if key in portrait_map:

@@ -21,7 +21,7 @@ from pathlib import Path
 from v2g.config import settings
 from v2g.godot import templates as T
 from v2g.llm import jsonfix
-from v2g.llm.analyzer import GameDesign, SceneDesign
+from v2g.llm.analyzer import GameDesign, SceneDesign, safe_name
 from v2g.llm.client import chat
 
 log = logging.getLogger(__name__)
@@ -271,17 +271,21 @@ def _asset_subject(design: GameDesign, key: str) -> str:
                 f"{c.name} ({c.role}): {c.visual}"
                 + (f"; actions: {c.behavior}" if c.behavior else "")
                 for c in design.characters
-                if T._safe(c.name) == name
+                if safe_name(c.name) == name
             ),
             "",
         )
     if kind == "objects":
         return next(
-            (f"{o.name} ({o.role}): {o.visual}" for o in design.objects if T._safe(o.name) == name),
+            (
+                f"{o.name} ({o.role}): {o.visual}"
+                for o in design.objects
+                if safe_name(o.name) == name
+            ),
             "",
         )
     if kind == "scenes":
-        return next((_scene_subject(s) for s in design.scenes if T._safe(s.name) == name), "")
+        return next((_scene_subject(s) for s in design.scenes if safe_name(s.name) == name), "")
     return ""
 
 
@@ -308,6 +312,52 @@ def _redraw_prompt(design: GameDesign, key: str, style: str) -> str:
         f"frame's palette or costumes."
     )
     return "\n\n".join(blocks)
+
+
+_CAPTION_SYSTEM = "You caption frames for a redraw brief. Answer with plain text only, no preamble."
+
+
+def _frame_caption(path: Path) -> str:
+    """The source frame as text (i2t2i): what it shows, never how to draw it.
+
+    The ref candidate is fed the frame as visual context, and pixels out-shout
+    text — restating the frame as a sentence keeps the brief in charge. Any
+    failure returns empty: the reference note then lacks the description,
+    never the authority rules.
+    """
+    ask = (
+        "Describe what this source frame shows: the subject and the identity cues that "
+        "say WHAT it is (person, item, place). One or two plain sentences. No style, "
+        "palette, composition or drawing advice of any kind."
+    )
+    try:
+        res = chat(_CAPTION_SYSTEM, [ask, path], temperature=0.0, max_tokens=200)
+    except Exception as e:  # noqa: BLE001 — a caption enriches the brief, it never gates it
+        log.info("imagegen: no source-frame caption (%s) — brief alone", e)
+        return ""
+    return " ".join(res.text.split())[:400]
+
+
+def _reference_prompt(brief: str, caption: str) -> str:
+    """The ref candidate's brief: text binding, the attached frame advisory.
+
+    The frame rides along as visual context, so this note re-asserts i2t2i —
+    the drawing is driven by the text (the brief plus what the frame shows,
+    captioned above), never by the frame's own pixels.
+    """
+    note = (
+        "SOURCE FRAME — REFERENCE ONLY, NEVER A TEMPLATE: the attached image is the "
+        "original frame this asset was cut from, shown only so you recognise what the "
+        "SUBJECT is. Every line of the brief above is binding and outranks the frame — "
+        "where they disagree, the frame loses."
+    )
+    if caption:
+        note += f" What the frame shows: {caption}."
+    note += (
+        " Draw from the text: never copy the frame's composition, palette, costume, "
+        "pose or lighting."
+    )
+    return f"{brief}\n\n{note}"
 
 
 _JUDGE_SYSTEM = (
@@ -434,10 +484,12 @@ def restyle_assets(
     a sibling ``*.redraw.png`` and the asset key is repointed at it, so the
     extracted frame survives for comparison and for a redo. With
     ``V2G_IMAGEGEN_AB`` each asset gets two candidates — one drawn with the
-    source frame as visual context, one from the brief alone — and a vision
-    judge keeps the better; both are staged under ``<run>/work/imagegen/``
-    during a run (a scratch directory otherwise) for comparison. One failing
-    asset keeps its original frame — image generation can never fail a run.
+    source frame as visual context (its brief stays binding: the frame is
+    captioned into text and demoted to a reference, never a template), one
+    from the brief alone — and a vision judge keeps the better; both are
+    staged under ``<run>/work/imagegen/`` during a run (a scratch directory
+    otherwise) for comparison. One failing asset keeps its original frame —
+    image generation can never fail a run.
     """
     if not assets:
         return
@@ -470,12 +522,16 @@ def restyle_assets(
         modes = (("ref", True), ("text", False)) if cand_dir else (("ref", True),)
         for key, path in list(assets.items()):
             brief = _redraw_prompt(design, key, style)
+            # ref candidate: the brief stays binding and the frame enters as
+            # text first (caption) — i2t2i, with the image as a reference.
+            ref_brief = _reference_prompt(brief, _frame_caption(path))
             redraw = _redraw_path(path)  # the extracted frame is never written to
             made: dict[str, Path] = {}
             for name, condition in modes:
                 dest = cand_dir / f"{key.replace('/', '__')}.{name}.png" if cand_dir else redraw
                 try:
-                    made[name] = provider.transform(path, brief, condition=condition, dest=dest)
+                    prompt = ref_brief if condition else brief
+                    made[name] = provider.transform(path, prompt, condition=condition, dest=dest)
                 except Exception as e:  # noqa: BLE001 — a failed candidate just drops out
                     log.warning("Image generation failed for %s (%s): %s", key, name, e)
             if not made:
