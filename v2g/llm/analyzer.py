@@ -6,6 +6,7 @@ visual style, spatial layout, and gameplay mechanics.
 """
 
 import logging
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -619,6 +620,76 @@ def asset_key_renames(before: GameDesign, after: GameDesign) -> dict[str, str]:
     return renames
 
 
+def _same_thing(a: str, b: str) -> bool:
+    """Two safe names name one physical thing: equal, or one contains the other.
+
+    Stage 1 lists a prop once per shot it shows up in, so one wall clock
+    arrives as 挂钟 / 白色挂钟 / 白色圆形挂钟. Containment is the cheap tell;
+    the shorter side needs at least two characters so a bare 门 cannot swallow
+    every door in the design.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) < len(b) else (b, a)
+    return len(shorter) >= 2 and shorter in longer
+
+
+def merge_duplicate_objects(objects: list[GameObject]) -> list[GameObject]:
+    """Collapse source objects that are one prop recognized several times.
+
+    Entries whose names say they are the same thing (see :func:`_same_thing`)
+    become a single object — the most detailed one, at the first entry's
+    position (the chunked-merge convention). Things that are only the same
+    *kind* stay separate items; if the re-skin later names two of them alike,
+    the names are numbered apart (:func:`_disambiguate_names`).
+    """
+    clusters: list[list[GameObject]] = []
+    for obj in objects:
+        key = safe_name(obj.name)
+        for cluster in clusters:
+            if any(_same_thing(key, safe_name(m.name)) for m in cluster):
+                cluster.append(obj)
+                break
+        else:
+            clusters.append([obj])
+    merged = [
+        max(c, key=lambda o: (len(o.visual) + len(o.behavior), len(o.name))) for c in clusters
+    ]
+    if len(merged) != len(objects):
+        log.info("Merged %d duplicate object(s) down to %d", len(objects), len(merged))
+    return merged
+
+
+def _disambiguate_names(entities: list) -> None:
+    """Give colliding entity names numeric suffixes in place: xx1, xx2, ...
+
+    Same-kind entities that the re-skin named alike stay separate items;
+    names are keys downstream (asset files, portraits, transitions), so each
+    member of a collision takes its own numbered name. Names that are already
+    unique are left alone.
+    """
+    keys = [safe_name(e.name) for e in entities]
+    counts = Counter(keys)
+    reserved = {k for k in keys if counts[k] == 1}
+    base_of: dict[str, str] = {}
+    taken: dict[str, int] = {}
+    for e, key in zip(entities, keys):
+        if counts[key] == 1:
+            continue
+        base = base_of.setdefault(key, e.name)
+        n = taken.get(key, 0)
+        while True:
+            n += 1
+            candidate = f"{base}{n}"
+            if safe_name(candidate) not in reserved:
+                break
+        taken[key] = n
+        reserved.add(safe_name(candidate))
+        e.name = candidate
+
+
 def _theme_block(instruct: str) -> str:
     """The THEME INSTRUCTION block appended to the stage-2 re-skin message.
 
@@ -714,7 +785,7 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
     rewritten.dialogue_samples = design.dialogue_samples  # transcript authority, not the model's
 
     # One-to-one structure: renames ride along, but a collapse/merge/split is
-    # a failed re-skin — names are keys downstream, duplicates would collide.
+    # a failed re-skin — entity counts are keys downstream.
     for label, before, after in (
         ("character", design.characters, rewritten.characters),
         ("object", design.objects, rewritten.objects),
@@ -726,18 +797,26 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
                 "stopping before the redraw stage rather than shipping a "
                 "source-faithful design"
             )
-        keys = [safe_name(e.name) for e in after]
-        if len(set(keys)) != len(keys):
-            raise LLMOutputError(
-                f"Design re-skin produced duplicate {label} name(s) — stopping before the "
-                "redraw stage rather than shipping a source-faithful design"
-            )
 
     # Back into source order, so asset keys, portraits and scene flow line up
     # with what stage 1 extracted.
     rewritten.characters = _reorder(design.characters, rewritten.characters, by_face=True)
     rewritten.objects = _reorder(design.objects, rewritten.objects)
     rewritten.scenes = _reorder(design.scenes, rewritten.scenes)
+
+    # Same-kind entities the re-skin named alike stay separate items: names are
+    # keys downstream (sprite files, portraits, transitions), so each takes a
+    # numbered one (xx1, xx2) in source order.
+    for label, entities in (
+        ("character", rewritten.characters),
+        ("object", rewritten.objects),
+        ("scene", rewritten.scenes),
+    ):
+        if len({safe_name(e.name) for e in entities}) != len(entities):
+            log.warning(
+                "Re-skin named several %s entries alike — numbering them xx1, xx2, ...", label
+            )
+            _disambiguate_names(entities)
 
     # Stage-1 speakers name the SOURCE cast — follow the rename so the
     # speaker→portrait mapping keeps its target (narration etc. stay as-is).

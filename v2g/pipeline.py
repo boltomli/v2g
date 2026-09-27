@@ -16,6 +16,7 @@ from v2g.llm.analyzer import (
     analyze_video_chunked,
     asset_key_renames,
     load_checkpoint,
+    merge_duplicate_objects,
     rewrite_design,
     save_checkpoint,
 )
@@ -151,6 +152,10 @@ def run(
         design = _analyze(source_video, work, transcript_lines, detailed=detailed)
         save_checkpoint(run_dir, design, key)
         log.info("Analysis complete; checkpoint saved (key=%.12s)", key)
+
+    # Stage 1 describes one physical prop once per shot it appears in — merge
+    # those entries before anything keys off object names (sprites, rename map).
+    design.objects = merge_duplicate_objects(design.objects)
 
     _print_design(design)
     log.info(

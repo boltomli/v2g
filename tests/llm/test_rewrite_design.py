@@ -15,6 +15,7 @@ from v2g.llm.analyzer import (
     SceneDesign,
     SceneTransition,
     asset_key_renames,
+    merge_duplicate_objects,
     rewrite_design,
 )
 from v2g.llm.errors import LLMOutputError
@@ -162,8 +163,9 @@ def test_a_reordered_cast_is_put_back_into_source_order(monkeypatch):
     }
 
 
-def test_duplicate_new_names_are_rejected(monkeypatch):
-    """Two entities collapsing onto one safe name would collide asset keys."""
+def test_duplicate_new_names_are_numbered_apart(monkeypatch):
+    """Same-kind entities the re-skin named alike stay separate items: each
+    takes a numbered name (xx1, xx2) so asset keys can never collide."""
     src = _design()
     src.characters = [
         Character(name="Hero", role="protagonist", visual="a"),
@@ -176,8 +178,24 @@ def test_duplicate_new_names_are_rejected(monkeypatch):
     ]
     _capture_rewrite(monkeypatch, collided)
 
-    with pytest.raises(LLMOutputError, match="duplicate character name"):
-        rewrite_design(src, "vampire theme")
+    kept = rewrite_design(src, "vampire theme")
+
+    assert [c.name for c in kept.characters] == ["Same1", "Same2"]
+
+
+def test_same_thing_several_times_is_merged_before_the_reskin():
+    """Stage 1 describes one wall clock per shot — 挂钟 / 白色挂钟 are the same
+    thing, so they collapse to one object instead of fighting over a name."""
+    src = _design()
+    src.objects = [
+        GameObject(name="挂钟", role="decoration", visual="round clock"),
+        GameObject(name="白色挂钟", role="decoration", visual="round white clock"),
+        GameObject(name="矿泉水瓶", role="decoration", visual="bottle"),
+    ]
+
+    merged = merge_duplicate_objects(src.objects)
+
+    assert [o.name for o in merged] == ["白色挂钟", "矿泉水瓶"]
 
 
 def test_scene_transitions_follow_renamed_scenes(monkeypatch):
