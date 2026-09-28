@@ -1,10 +1,15 @@
 """Sound effects: fixed VN event sounds plus per-line diegetic cues.
 
 Two layers, one endpoint: clips come from the trunk chat-audio endpoint with
-``V2G_SFX_MODEL`` (unset = SFX off; which backend serves the model is the
-user's routing concern — see :mod:`v2g.audio_api`). The per-line cues are
-derived from the finished design by ONE cached LLM call — stage 3 reads
-stages 1/2, so no schema or analyzer prompt changes.
+``V2G_SFX_MODEL``, **falling back to the voice-over model**
+(``V2G_TTS_MODEL``) — both unset = SFX off. Since the serving model is a
+TEXT-TO-SPEECH model, cues are Chinese onomatopoeia a voice can perform
+(咚咚咚 / 哗啦啦 / 叮——), never descriptions: whatever we send gets read
+aloud. Which backend actually serves the model is the user's routing concern
+(see :mod:`v2g.audio_api`).
+
+The per-line cues are derived from the finished design by ONE cached LLM
+call — stage 3 reads stages 1/2, so no schema or analyzer prompt changes.
 
 Contract, like every audio layer here: never fails a run. Endpoint problems
 warn once and disable SFX; a bad clip drops only that clip.
@@ -24,31 +29,32 @@ from v2g.llm.client import ChatResult, chat
 
 log = logging.getLogger(__name__)
 
-_EVENT_SECONDS = {"select": 0.5, "transition": 1.0}
-_CUE_SECONDS = 2.0
 _MAX_CUES = 8  # cap on non-empty content cues per script
 _EVENT_PROMPTS = {
-    "select": "short soft UI click, gentle confirmation blip, clean, no melody",
-    "transition": "soft airy whoosh transition sweep, brief, cinematic",
+    # Vocal (TTS-read) sound words: the gateway's TTS model performs them.
+    "select": "叮——",
+    "transition": "嗖——",
 }
 
 _SFX_SYSTEM = """\
 You are the sound designer for a visual novel. You receive a game design JSON;
 `dialogue_samples` is the full script in play order.
 
+The sound effects are spoken by a TEXT-TO-SPEECH model, so cues must be
+short Chinese onomatopoeia (拟声词) a voice can perform — never descriptions.
+
 Return ONLY a JSON array of strings, EXACTLY as long as `dialogue_samples`,
 one entry per sample in order. Each entry is either:
 - "" (no sound — the default), or
-- one short English sound-effect cue of at most 8 words naming ONE concrete
-  diegetic sound clearly implied by the line, its `context` or the design's
-  atmosphere (examples: "door knock", "rain on window", "sword clash",
-  "distant thunder", "footsteps on gravel").
+- one onomatopoeia phrase of 2–8 characters, e.g. 咚咚咚 / 哗啦啦 /
+  轰隆隆 / 叮咚 / 咔嚓 / 汪汪.
 
 Rules:
 - At most 8 non-empty entries overall; prefer silence.
-- Sounds only: no music, no ambience beds, no vocals, no UI blips, and never
-  a narration of the event — a cue must be recordable as a short sound effect.
-- Never contradict the story.
+- Pure sound words only: no descriptions, no sentences, no music notation,
+  no explanation — anything written gets read aloud.
+- The sound must follow from the line, its `context` or the atmosphere, and
+  never contradict the story.
 - Output raw JSON only: no markdown fences, no commentary.
 """
 
@@ -113,30 +119,35 @@ class Sfx:
 
     def __init__(self, sfx_dir: Path) -> None:
         self.sfx_dir = sfx_dir
+        self.model = settings.sfx_model.strip() or settings.tts_model.strip()
         self.cues: list[str] = []  # aligned to design.dialogue_samples
         self.enabled = True
         self.generated = 0
         self._by_text: dict[str, str] = {}
 
-    def _clip(self, text: str, duration: float, stem: str) -> str | None:
-        """Synthesize one clip into ``assets/sfx/<stem>.mp3`` → res path or None."""
+    def _clip(self, text: str, stem: str) -> str | None:
+        """Synthesize one clip into ``assets/sfx/<stem>.mp3`` → res path or None.
+
+        The text reaches the TTS model verbatim — no prompt decoration and no
+        duration hints: the model READS whatever it is given, so anything
+        appended would be spoken aloud.
+        """
         text = text.strip()
-        if not text or not self.enabled:
+        if not text or not self.enabled or not self.model:
             return None
         if text in self._by_text:
             return self._by_text[text]
         material = {
-            "model": settings.sfx_model,
+            "model": self.model,
             "text": text,
-            "duration": duration,
             "format": "mp3",
         }
         try:
-            data = cache.audio_find("sfx", material, "mp3")
-            if data is None:
-                # Length travels in the prompt — the body stays a plain OpenAI request.
-                spoken = f"{text}, {duration:g} seconds"
-                data = audio_api.chat_audio(settings.sfx_model.strip(), spoken)
+            found = cache.audio_find("sfx", material, "mp3")
+            if found is not None:
+                data = found.read_bytes()
+            else:
+                data = audio_api.chat_audio(self.model, text)
                 if not data:
                     log.debug("Sound effect endpoint returned no audio for %r", text[:60])
                     return None
@@ -166,7 +177,7 @@ class Sfx:
         prompt = _EVENT_PROMPTS.get(name)
         if prompt is None:
             return None
-        return self._clip(prompt, _EVENT_SECONDS[name], name)
+        return self._clip(prompt, name)
 
     def step_cue(self, index: int) -> str | None:
         """Path of dialogue sample *index*'s cue, or None (empty/absent/off)."""
@@ -175,12 +186,12 @@ class Sfx:
         cue = self.cues[index].strip()
         if not cue:
             return None
-        return self._clip(cue, _CUE_SECONDS, f"cue_{index}")
+        return self._clip(cue, f"cue_{index}")
 
 
 def build_sfx(run_dir: Path, design: GameDesign) -> Sfx | None:
-    """The run's SFX builder; None when ``V2G_SFX_MODEL`` is unset. Never raises."""
-    if not settings.sfx_model.strip():
+    """The run's SFX builder; None when no model backs it. Never raises."""
+    if not (settings.sfx_model.strip() or settings.tts_model.strip()):
         return None
     sfx = Sfx(run_dir / "assets" / "sfx")
     cues = derive_cues(design)
@@ -190,8 +201,9 @@ def build_sfx(run_dir: Path, design: GameDesign) -> Sfx | None:
         sfx.cues = cues
         log.log(
             runlog.NOTICE,
-            "SFX: %d content cue(s) derived (cap %d)",
+            "SFX: %d content cue(s) via %s (cap %d)",
             sum(1 for c in cues if c.strip()),
+            sfx.model,
             _MAX_CUES,
         )
     return sfx

@@ -119,10 +119,8 @@ def test_event_and_cue_clips_land_in_project_and_cache(audio_server, tmp_path, m
     assert body["model"] == "sfx-xl"
     assert body["modalities"] == ["text", "audio"]
     assert body["audio"] == {"format": "mp3", "voice": "alloy"}
-    assert "duration" not in body  # strict OpenAI body — length rides the prompt
-    content = body["messages"][0]["content"]
-    assert "UI click" in content  # prompt carries the event text
-    assert "0.5 seconds" in content
+    assert "duration" not in body  # the TTS model reads text verbatim — no spoken hints
+    assert body["messages"][0]["content"] == "叮——"  # vocal event word, exactly
     assert len(state["requests"]) == 2
 
     # A fresh builder (rerun): the audio cache answers — no new requests.
@@ -161,19 +159,25 @@ def test_endpoint_failure_disables_sfx_with_one_warning(
     assert sum("Sound effects disabled" in m for m in caplog.messages) == 1
 
 
-def test_build_sfx_follows_the_model_switch(tmp_path, monkeypatch):
+def test_build_sfx_follows_model_switches_with_tts_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "output_root", tmp_path)
-
-    # Off: no model → no builder, no LLM call.
     monkeypatch.setattr(settings, "sfx_model", "")
+    monkeypatch.setattr(settings, "tts_model", "")
+
+    # No model at all → off, no builder, no LLM call.
     assert sfx.build_sfx(tmp_path, _design()) is None
 
-    # On: cues come from the (faked) derivation call.
-    monkeypatch.setattr(settings, "sfx_model", "sfx-xl")
-    monkeypatch.setattr(sfx, "derive_cues", lambda design: ["", "rain on window"])
+    # The voice-over model backs SFX when no dedicated model is set.
+    monkeypatch.setattr(settings, "tts_model", "mimo-v2.5-tts")
+    monkeypatch.setattr(sfx, "derive_cues", lambda design: ["", "咚咚咚"])
     built = sfx.build_sfx(tmp_path, _design())
     assert built is not None
-    assert built.cues == ["", "rain on window"]
+    assert built.model == "mimo-v2.5-tts"
+    assert built.cues == ["", "咚咚咚"]
+
+    # A dedicated SFX model wins over the fallback.
+    monkeypatch.setattr(settings, "sfx_model", "sfx-xl")
+    assert sfx.build_sfx(tmp_path, _design()).model == "sfx-xl"
 
 
 def test_derive_cues_parses_normalizes_and_caps(monkeypatch):

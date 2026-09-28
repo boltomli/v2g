@@ -1,9 +1,12 @@
 """Voice-over synthesis (TTS) for the VN's narration and dialogue.
 
-One backend: the **trunk endpoint** — ``POST <V2G_LLM_BASE_URL>/audio/speech``
-with the LLM's key and the model from ``V2G_TTS_MODEL`` (that model setting
-is also the on/off switch; unset = the VN stays text-only). Which vendor
-actually serves the model is the user's routing concern.
+One backend: the **trunk endpoint** — the model from ``V2G_TTS_MODEL`` with
+the LLM's key (that model setting is also the on/off switch; unset = the VN
+stays text-only). ``POST <base>/audio/speech`` is tried first; when the
+endpoint has no such route (some gateways serve TTS only through chat
+completions) it falls back to the OpenAI chat-TTS protocol in
+:mod:`v2g.audio_api`. Which vendor actually serves the model is the user's
+routing concern.
 
 To support another backend, subclass :class:`TTSProvider` and wire it into
 ``build_synth`` — the rest of the pipeline only ever sees a ``Synthesizer``.
@@ -60,6 +63,7 @@ class OpenAITTS(TTSProvider):
     def synthesize(self, text: str, voice: str) -> bytes | None:
         import openai
 
+        from v2g import audio_api
         from v2g.llm.client import _get_client
 
         try:
@@ -70,7 +74,15 @@ class OpenAITTS(TTSProvider):
                 response_format="mp3",
             )
         except openai.OpenAIError as e:  # status / connection / auth — endpoint-wide
-            raise TTSUnavailable(f"audio/speech via {settings.llm_base_url}: {e}") from e
+            if getattr(e, "status_code", None) != 404:
+                raise TTSUnavailable(f"audio/speech via {settings.llm_base_url}: {e}") from e
+            # Endpoint has no /audio/speech route (some gateways serve TTS only
+            # through chat completions) — fall back to the OpenAI chat-TTS
+            # protocol; AudioAPIError detail (voice lists, message rules) shows up.
+            try:
+                return audio_api.chat_audio(settings.tts_model, text, voice=voice)
+            except audio_api.AudioAPIError as e2:
+                raise TTSUnavailable(f"chat-TTS via {settings.llm_base_url}: {e2}") from e2
         return resp.content or None
 
 

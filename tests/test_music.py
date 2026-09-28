@@ -10,6 +10,7 @@ import pytest
 from v2g import music
 from v2g.config import settings
 from v2g.llm.analyzer import GameDesign
+from v2g.llm.client import ChatResult
 
 FAKE_MP3 = b"ID3-fake-mp3-bytes"
 
@@ -272,3 +273,58 @@ def test_music_prompt_carries_atmosphere_style_theme_and_instrumental_directive(
     assert "cinematic, piano" in prompt
     assert "cyberpunk" in prompt
     assert "no vocals" in prompt
+
+
+# ── `llm` provider: the text model writes the synth script ──────────────────
+
+
+_WAV_SCRIPT = """\
+import sys, wave
+w = wave.open(sys.argv[1], "wb")
+w.setnchannels(1)
+w.setsampwidth(2)
+w.setframerate(8000)
+w.writeframes(b"\\x00\\x00" * 800)
+w.close()
+"""
+
+
+def _settings_llm(monkeypatch, tmp_path, code: str) -> None:
+    monkeypatch.setattr(settings, "output_root", tmp_path)
+    monkeypatch.setattr(settings, "music_provider", "llm")
+    monkeypatch.setattr(settings, "music_model", "mimo-v2.6-flash")
+    monkeypatch.setattr(settings, "music_duration", 1)
+    monkeypatch.setattr(music, "chat", lambda *a, **k: ChatResult(code, False, "k"))
+
+
+def test_llm_provider_executes_the_generated_script(tmp_path, monkeypatch):
+    _settings_llm(monkeypatch, tmp_path, _WAV_SCRIPT)
+    run_dir = tmp_path / "run"
+
+    path = music.generate_music(_design(), None, run_dir)
+
+    assert path == "res://assets/bgm/bgm.mp3"
+    data = (run_dir / "assets" / "bgm" / "bgm.mp3").read_bytes()
+    assert data[:3] == b"ID3"  # ffmpeg turned the script's wav into an mp3
+    # The script itself is kept for inspection.
+    assert (run_dir / "work" / "bgm_llm" / "bgm_llm.py").read_text(encoding="utf-8") == (
+        _WAV_SCRIPT.strip()
+    )
+
+    # Second run: served from the audio cache — chat is not called again.
+    def _boom(*_a, **_k):
+        raise AssertionError("chat must not run on a cache hit")
+
+    monkeypatch.setattr(music, "chat", _boom)
+    assert music.generate_music(_design(), None, run_dir) == path
+
+
+def test_llm_provider_failing_script_is_skipped_without_raising(tmp_path, monkeypatch, caplog):
+    _settings_llm(monkeypatch, tmp_path, "import sys\nsys.exit(3)\n")
+    run_dir = tmp_path / "run"
+
+    with caplog.at_level(music.runlog.NOTICE):
+        assert music.generate_music(_design(), None, run_dir) is None
+
+    assert not (run_dir / "assets" / "bgm" / "bgm.mp3").exists()
+    assert any("BGM: skipped" in m for m in caplog.messages)

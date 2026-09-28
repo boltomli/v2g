@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # Background music + sound effects — chat-completions audio on the trunk endpoint
     music_model: str = ""  # "" = off | chat model for audio (api) / DiT selection (acestep)
     music_provider: str = (
-        "api"  # "api" = OpenAI chat audio on the trunk endpoint | "acestep" = local ACE-Step REST
+        "api"  # "api" = chat audio | "llm" = model writes synth code | "acestep" = local REST
     )
     music_acestep_url: str = (
         "http://127.0.0.1:8001"  # acestep provider: a running acestep-api base URL

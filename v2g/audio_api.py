@@ -115,19 +115,8 @@ def _to_mp3(data: bytes, mime: str) -> bytes:
     return proc.stdout
 
 
-def chat_audio(model: str, prompt: str) -> bytes:
-    """One clip for *prompt* from the trunk endpoint, OpenAI format → mp3 bytes.
-
-    Raises :class:`AudioAPIError` for every failure mode (bad transport,
-    non-audio answer, unparsable payload) — never a raw urllib exception.
-    """
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "modalities": ["text", "audio"],
-        "audio": {"format": "mp3", "voice": _AUDIO_VOICE},
-    }
+def _post_chat(payload: dict) -> tuple[int, bytes]:
+    """POST the chat payload → (status, body); transport errors raise."""
     req = urllib.request.Request(
         f"{settings.llm_base_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -138,11 +127,45 @@ def chat_audio(model: str, prompt: str) -> bytes:
         req.add_header("Authorization", f"Bearer {settings.llm_api_key}")
     try:
         with urllib.request.urlopen(req, timeout=_CHAT_TIMEOUT) as resp:
-            raw = resp.read()
+            return resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        raise AudioAPIError(f"chat/completions → HTTP {e.code}") from e
+        return e.code, e.read()
     except urllib.error.URLError as e:
         raise AudioAPIError(f"endpoint unreachable: {e.reason}") from e
+
+
+def chat_audio(model: str, prompt: str, *, voice: str | None = None) -> bytes:
+    """One clip for *prompt* from the trunk endpoint, OpenAI format → mp3 bytes.
+
+    ``voice`` defaults to the first ``V2G_TTS_VOICES`` entry (gateways name
+    their own voices), else ``alloy``. Some TTS-model gateways reject
+    user-only conversations ("messages must contain an assistant role") —
+    such a 400 is retried once with the prompt mirrored into an assistant
+    turn, which is their read-this-text protocol.
+
+    Raises :class:`AudioAPIError` for every failure mode (bad transport,
+    non-audio answer, unparsable payload) — never a raw urllib exception;
+    HTTP error bodies (bounded) ride the message so misconfiguration is
+    visible in the run log.
+    """
+    configured = [v.strip() for v in settings.tts_voices.split(",") if v.strip()]
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "modalities": ["text", "audio"],
+        "audio": {
+            "format": "mp3",
+            "voice": voice or (configured[0] if configured else _AUDIO_VOICE),
+        },
+    }
+    status, raw = _post_chat(payload)
+    if status == 400 and b"assistant" in raw:
+        payload["messages"] = payload["messages"] + [{"role": "assistant", "content": prompt}]
+        status, raw = _post_chat(payload)
+    if status != 200:
+        detail = raw[:300].decode("utf-8", errors="replace").replace("\n", " ")
+        raise AudioAPIError(f"chat/completions → HTTP {status}: {detail}")
     try:
         body = json.loads(raw)
     except ValueError as e:

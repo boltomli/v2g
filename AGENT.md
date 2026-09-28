@@ -141,14 +141,14 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_CHUNK_DURATION` | `60` | Seconds per analysis chunk (detail mode; must be ≤ `V2G_MAX_DURATION`) |
 | `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB per chunk |
-| `V2G_TTS_MODEL` | — | Voice-over: `/audio/speech` model on the LLM endpoint (e.g. `gpt-4o-mini-tts`, `tts-1`); unset = off |
-| `V2G_TTS_VOICES` | API defaults | Comma-separated voices; the first speaks narration, characters rotate the rest |
+| `V2G_TTS_MODEL` | — | Voice-over model; calls `/audio/speech` and falls back to chat-TTS when that route is missing (e.g. `gpt-4o-mini-tts`, `mimo-v2.5-tts`); unset = off |
+| `V2G_TTS_VOICES` | API defaults | Comma-separated voices; the first speaks narration and sets chat-audio `audio.voice`, characters rotate the rest |
 | `V2G_TTS_TEXT` | `zh` | Spoken text: `zh` = Chinese line (default), `source` = verbatim transcript line, falling back to Chinese |
-| `V2G_MUSIC_MODEL` | — | Background music model: chat audio on the LLM endpoint, or the DiT id for `acestep`; unset = off |
-| `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio on the LLM endpoint; `acestep` = local ACE-Step REST server |
+| `V2G_MUSIC_MODEL` | — | Background music model: chat audio (`api`), the code-writing text model (`llm`), or the DiT id (`acestep`); unset = off |
+| `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio; `llm` = the text model writes the synth code (works with no music model, executes model-written Python); `acestep` = local ACE-Step REST |
 | `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
 | `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
-| `V2G_SFX_MODEL` | — | Sound effects: chat-completions model routed to an SFX backend on the LLM endpoint; unset = off |
+| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (vocal onomatopoeia cues); both unset = off |
 
 ## Language & dialogue contract
 
@@ -510,15 +510,19 @@ audio.
 line and the title card; the end card and choice options are never spoken.
 
 - Backend: `POST <V2G_LLM_BASE_URL>/audio/speech` with the trunk key and the
-  model from `V2G_TTS_MODEL` (**unset = off**). Zero new dependencies; which
-  vendor actually serves the model is the user's routing concern. To support
-  another backend, subclass `TTSProvider` and wire it into `build_synth` —
-  the rest of the pipeline only ever sees a `Synthesizer`.
+  model from `V2G_TTS_MODEL` (**unset = off**). When the endpoint has no
+  such route (some gateways serve TTS only through chat completions) it
+  **falls back to the chat-TTS protocol** in `v2g.audio_api` — same
+  OpenAI chat shape as BGM/SFX, including the one-shot assistant-message
+  retry gateways like Xiaomi's token-plan require. Zero new dependencies;
+  which vendor actually serves the model is the user's routing concern.
+  To support another backend, subclass `TTSProvider` and wire it into
+  `build_synth` — the rest of the pipeline only ever sees a `Synthesizer`.
 - Text: `V2G_TTS_TEXT=zh` (default) speaks `line_zh`; `source` speaks the
   verbatim transcript line and falls back to Chinese.
 - Voices: `V2G_TTS_VOICES` (default = the endpoint's standard list); the
-  first voice is the narrator, every speaker rotates the rest in
-  first-appearance order (stable within a run).
+  first voice is the narrator **and** sets chat-audio `audio.voice`, every
+  speaker rotates the rest in first-appearance order (stable within a run).
 - Synthesis happens inside `_build_story` — the single place that knows
   which steps are voiceable. Each clip lands in `assets/voice/<hash>.*` and
   the step gains a `voice` key; clips are content-addressed in
@@ -548,6 +552,17 @@ built from `atmosphere` + `style` + the stage-2 theme, closing with an
   `POST /release_task` (with `audio_duration`, empty `lyrics`, optional DiT
   `model`) → poll `POST /query_result` → `GET /v1/audio`. Starting and
   stopping that server is the user's job; v2g only talks to it.
+- Codegen alternative (`V2G_MUSIC_PROVIDER=llm`): the **text model writes
+  the music** — one cached chat call returns a self-contained Python script
+  (exact duration/sample rate in the spec, numpy when available, stdlib
+  otherwise), kept at `<run>/work/bgm_llm/bgm_llm.py`, executed as
+  `python -I` with a 180 s timeout in that directory, then ffmpeg → mp3.
+  Works on any trunk that has no music model. **This executes model-written
+  code** — only point it at an endpoint you trust; failures (syntax,
+  timeout, bad output) degrade to "no music", never a failed run.
+- Why not MIDI: rendering needs an external synthesizer (fluidsynth/timidity
+  plus a soundfont, none of which ship here) — the codegen path renders
+  audio directly instead; MIDI support can be added when a renderer exists.
 - Track → `assets/bgm/bgm.mp3`, cached in `.v2g_cache/music/` with the same
   content addressing. The runtime loops it (`AudioStreamMP3.loop`) at −6 dB
   under the voice-over, from start to restart.
@@ -557,19 +572,21 @@ built from `atmosphere` + `style` + the stage-2 theme, closing with an
 
 **Sound effects** (`v2g/sfx.py`) — two layers, one endpoint:
 
-- Fixed event clips with fixed prompts: `select` (a choice was picked) and
-  `transition` (the background flashed).
-- Per-line cues: **ONE cached LLM call** derives a short English sound cue
-  per `dialogue_samples` entry (`""` = silence, at most 8 non-empty) —
-  stage 3 reads stages 1/2 only, so no schema or analyzer prompt changes;
-  malformed answers pad/truncate to the script length or fall back to
-  event sounds only.
-- Clips synthesize through the same OpenAI chat-audio call with
-  `V2G_SFX_MODEL` (**unset = off**); they land in `assets/sfx/` and cache in
-  `.v2g_cache/sfx/`. The story embeds each cue path per step and `SFX_JSON`
-  carries the event map. The failure taxonomy mirrors voice-over:
-  endpoint-wide problems warn **once** and disable SFX for the run, a bad
-  clip drops only that clip.
+- Fixed event clips with fixed vocal words: `select` = 叮——, `transition` =
+  嗖——; per-line cues come from **ONE cached LLM call** deriving short
+  Chinese **onomatopoeia** (拟声词: 咚咚咚 / 哗啦啦 / 轰隆隆, cap 8 non-empty,
+  `""` = silence) — stage 3 reads stages 1/2 only, so no schema or analyzer
+  prompt changes; malformed answers pad/truncate to the script length or
+  fall back to event sounds only.
+- Cues are vocal **because the serving model is a TTS model**: it READS
+  whatever we send, so descriptions would be spoken aloud — hence sound
+  words, sent verbatim (no prompt decoration, no duration hints).
+- Backend: `V2G_SFX_MODEL` when set, otherwise the voice-over model
+  (`V2G_TTS_MODEL`); both unset = SFX off. Clips land in `assets/sfx/` and
+  cache in `.v2g_cache/sfx/`. The story embeds each cue path per step and
+  `SFX_JSON` carries the event map. The failure taxonomy mirrors
+  voice-over: endpoint-wide problems warn **once** and disable SFX for the
+  run, a bad clip drops only that clip.
 
 ### Scene tree (main.tscn)
 
