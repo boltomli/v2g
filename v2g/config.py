@@ -57,7 +57,9 @@ class Settings(BaseSettings):
         "http://127.0.0.1:8001"  # acestep provider: a running acestep-api base URL
     )
     music_duration: int = 60  # seconds per track (10–600; folded into the prompt / REST param)
-    sfx_model: str = ""  # "" = off | model routed to a sound-effects-capable backend
+    sfx_provider: str = (
+        ""  # "" = off | "llm" = the text model writes the synth scripts (run locally)
+    )
 
     # Output
     output_root: Path = Path("projects")

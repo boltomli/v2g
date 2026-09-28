@@ -23,18 +23,15 @@ project simply ships without music and says so.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
-import re
-import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-from v2g import audio_api, cache, runlog
+from v2g import audio_api, cache, codegen, runlog
 from v2g.audio_api import AudioAPIError
 from v2g.config import settings
 from v2g.llm.analyzer import GameDesign
@@ -163,12 +160,6 @@ def _poll(base: str, task_id: str) -> dict:
 
 def _codegen_system() -> str:
     """Spec for the text model: one self-contained Python script → WAV."""
-    has_numpy = importlib.util.find_spec("numpy") is not None
-    libs = (
-        "numpy is installed — use it for synthesis"
-        if has_numpy
-        else "STANDARD LIBRARY ONLY (math/array/wave/struct/random) — numpy is NOT installed"
-    )
     return f"""\
 You are an expert Python audio programmer. Write ONE self-contained Python
 script that renders instrumental background music for a visual novel and
@@ -177,7 +168,7 @@ writes it to disk.
 Contract:
 - The script receives the OUTPUT WAV PATH as sys.argv[1] and writes exactly
   {settings.music_duration} seconds of 16-bit PCM stereo audio at 44100 Hz there.
-- Runtime: Python {sys.version_info.major}.{sys.version_info.minor}; {libs}.
+- Runtime: Python {sys.version_info.major}.{sys.version_info.minor}; {codegen.libs_note()}.
 - Deterministic: fixed random seed. No network, no reading of any file, no
   input(), no GUI, no packages beyond what is stated above.
 - Musically: a chord pad, a simple melody and a light rhythm fitting the
@@ -189,12 +180,6 @@ Output ONLY the raw Python source — no markdown fences, no commentary.
 """
 
 
-def _extract_code(text: str) -> str:
-    """Raw source from a model answer; strips markdown fences when present."""
-    fenced = re.findall(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
-    return (fenced[-1] if fenced else text).strip()
-
-
 def _llm_track(prompt: str, run_dir: Path) -> bytes:
     """Text model writes a synthesis script → run it isolated → wav → mp3.
 
@@ -203,52 +188,14 @@ def _llm_track(prompt: str, run_dir: Path) -> bytes:
     kept there for inspection. Any failure becomes :class:`AudioAPIError`, so
     the layer degrades to "no music" instead of failing the run.
     """
-    work = (run_dir / "work" / "bgm_llm").resolve()
-    work.mkdir(parents=True, exist_ok=True)
     try:
         res = chat(_codegen_system(), [prompt], temperature=0.4)
     except Exception as e:
         raise AudioAPIError(f"music codegen chat failed: {e}") from e
-    code = _extract_code(res.text)
+    code = codegen.extract_code(res.text)
     if not code:
         raise AudioAPIError("music codegen returned no code")
-    (work / "bgm_llm.py").write_text(code, encoding="utf-8")
-
-    wav = work / "bgm.wav"
-    wav.unlink(missing_ok=True)
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-I", "-c", code, str(wav)],
-            cwd=str(work),
-            capture_output=True,
-            timeout=180,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        raise AudioAPIError(f"music codegen script could not run: {e}") from e
-    if proc.returncode != 0 or not wav.is_file() or wav.stat().st_size == 0:
-        # stdout first: a wrong-exit or wrong output path explains itself
-        # there; stderr only carries a traceback for a real crash.
-        tail = (
-            proc.stdout.decode("utf-8", errors="replace")[-300:]
-            or proc.stderr.decode("utf-8", errors="replace")[-300:]
-            or "(no output)"
-        )
-        raise AudioAPIError(
-            f"music codegen script failed (exit {proc.returncode}): {tail.replace(chr(10), ' ')}"
-        )
-
-    mp3 = work / "bgm.mp3"
-    mp3.unlink(missing_ok=True)
-    proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-y", "-i", str(wav), "-f", "mp3", "-q:a", "4", str(mp3)],
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0 or not mp3.is_file() or mp3.stat().st_size == 0:
-        err = proc.stderr.decode("utf-8", errors="replace")[-400:].replace("\n", " ")
-        raise AudioAPIError(f"ffmpeg wav→mp3 failed: {err}")
-    return mp3.read_bytes()
+    return codegen.render(code, run_dir / "work" / "bgm_llm", stem="bgm_llm", timeout=180)
 
 
 # ── Pipeline entry point ─────────────────────────────────────────────────────

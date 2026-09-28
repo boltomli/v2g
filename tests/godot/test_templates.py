@@ -155,6 +155,74 @@ def test_vn_story_without_synth_has_no_voice_paths_but_keeps_player_wiring():
     assert 'var voice_res: String = step.get("voice", "")' in script
 
 
+# ── Transcript-less runs: dialogue lives in line_zh alone ───────────────────
+
+
+def _transcriptless_design() -> GameDesign:
+    """A video with no subtitles: every `line` is empty, `line_zh` carries
+    both narration and dialogue (the analyzer's no-transcript contract)."""
+    return GameDesign(
+        title="T",
+        genre="vn",
+        summary="s",
+        mechanics=[],
+        controls=["Space"],
+        style="cinematic",
+        objects=[],
+        scenes=[SceneDesign(name="Stone Corridor", description="d")],
+        characters=[Character(name="Guard Knight", role="companion", visual="v")],
+        dialogue_samples=[
+            DialogueSample(speaker="", line="", line_zh="夜色落下。"),
+            DialogueSample(speaker="Guard Knight", line="", line_zh="跟我来。"),
+            DialogueSample(speaker="Guard Knight", line="", line_zh=""),  # degenerate
+        ],
+    )
+
+
+def test_transcriptless_dialogue_still_keys_speaker_sprite_name_and_voice():
+    """Regression: keying on `line` demoted a whole subtitle-less cast to the
+    narrator — no sprites, no name labels, one voice for everyone."""
+    design = _transcriptless_design()
+    assets = {"characters/guard_knight": Path("/x/char_guard_knight.png")}
+    synth = _FakeSynth()
+
+    steps, _, _portraits, names = T._build_story(design, assets, synth=synth)
+
+    dialogue = steps[2]  # steps[0] is the title card
+    assert dialogue["speaker"] == "guard_knight"
+    assert dialogue["sprite"] == "guard_knight"
+    assert names["guard_knight"] == "Guard Knight"
+    assert names[""] == "旁白"
+    # Narration keys to the narrator; the speaker row keys to its character.
+    spoken = dict(synth.spoken)
+    assert spoken["夜色落下。"] == ""
+    assert spoken["跟我来。"] == "guard_knight"
+    # A speaker row with no text anywhere is still narration, not a name label.
+    assert steps[3]["speaker"] == ""
+
+
+def test_voice_design_derives_keys_for_transcriptless_speakers(monkeypatch):
+    """The voice-design call must receive the character keys too — otherwise
+    every speaker borrows the narrator's card."""
+    import json
+
+    from v2g import tts
+    from v2g.llm.client import ChatResult
+
+    captured = {}
+
+    def _chat(_system, parts, **_kw):
+        captured.update(json.loads(parts[0]))
+        return ChatResult('{"voices": {"": "旁白卡", "guard_knight": "卫兵卡"}}', False, "k")
+
+    monkeypatch.setattr(tts, "chat", _chat)
+    designs = tts.derive_voice_designs(_transcriptless_design())
+
+    assert captured["speaker_keys"] == ["", "guard_knight"]
+    assert designs is not None
+    assert designs["guard_knight"] == "卫兵卡"
+
+
 def test_vn_story_speaks_the_source_line_in_source_mode(monkeypatch):
     monkeypatch.setattr(settings, "tts_text", "source")
     synth = _FakeSynth()

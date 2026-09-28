@@ -17,7 +17,7 @@ _AUDIO_DEFAULTS = {
     "music_provider": "api",
     "music_acestep_url": "http://127.0.0.1:8001",
     "music_duration": 60,
-    "sfx_model": "",
+    "sfx_provider": "",
 }
 
 

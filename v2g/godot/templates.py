@@ -174,9 +174,11 @@ def _build_story(
             step["bg"] = bg_order[min(i * len(bg_order) // max(n, 1), len(bg_order) - 1)]
         key = speaker_key(ds, design.characters)
         step["speaker"] = key
-        # Dialogue row (line + speaker): it may still key to "" for a
+        # Dialogue row (speaker + text in either language — a transcript-less
+        # run carries it in line_zh alone): it may still key to "" for a
         # degenerate name — setdefault/sprite checks then no-op as before.
-        if ds.line.strip() and ds.speaker.strip():
+        has_text = bool(ds.line.strip() or ds.line_zh.strip())
+        if ds.speaker.strip() and has_text:
             speaker_names.setdefault(key, ds.speaker)
             if key in portrait_map:
                 step["sprite"] = key

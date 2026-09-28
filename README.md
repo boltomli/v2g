@@ -34,17 +34,18 @@ Key properties of generated games:
 - **Bilingual text**: every line shows the verbatim source-language transcript
   plus a Simplified Chinese subtitle; narration and UI are Chinese-only.
   Source-language text is extracted from the video's subtitles — never invented.
-- **Voice-over + music (optional)**: all three audio layers run against the
+- **Voice-over + music (optional)**: voice-over and music run against the
   **same endpoint as the LLM** — `V2G_TTS_MODEL` speaks the narration and
   every dialogue line (preset voices via `/audio/speech`, or one designed
   voice per character + narrator with a `…-voicedesign` model);
   `V2G_MUSIC_MODEL` adds a loopable background track (OpenAI chat-audio — or
   `V2G_MUSIC_PROVIDER=llm` and the text model *writes* the synth code;
-  `acestep` falls back to a local ACE-Step server); the TTS model (or
-  `V2G_SFX_MODEL`) performs select/transition effects and per-line cues from
-  bracketed sound descriptions. Each layer is off until its model is set,
-  cached across runs, and can never fail a run — which backend serves a model
-  is your routing concern.
+  `acestep` falls back to a local ACE-Step server); sound effects
+  (`V2G_SFX_PROVIDER=llm`) are synthesized **locally** — the text model
+  writes one short synth script per cue, executed on your machine, so a
+  cue can never come back as a spoken voice. Each layer is off until its
+  switch is set, cached across runs, and can never fail a run — which
+  backend serves a model is your routing concern.
 
 Two analysis modes (both part of stage 1):
 
@@ -166,7 +167,7 @@ All settings via environment variables (or `.env` file):
 | `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio; `llm` = the text model writes the synth code (works with no music model, executes model-written Python); `acestep` = local ACE-Step REST |
 | `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
 | `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
-| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (bracketed sound descriptions performed as audio tags); both unset = off |
+| `V2G_SFX_PROVIDER` | — | Sound-effects backend; `llm` = the text model writes one synthesis script per cue, run locally (model-written Python, same machinery as the BGM `llm` provider); unset or unknown = off |
 
 ## Development
 
@@ -197,9 +198,10 @@ v2g/
 │   ├── config.py            # settings
 │   ├── pipeline.py          # orchestrator
 │   ├── audio_api.py         # shared chat-completions audio client (trunk endpoint)
+│   ├── codegen.py           # shared runner for model-written synth scripts (wav → mp3)
 │   ├── tts.py               # voice-over synthesizer (/audio/speech) + assignment
 │   ├── music.py             # BGM: prompt + delivery of one loopable track
-│   ├── sfx.py               # sound-effect cues (cached LLM call) + event clips
+│   ├── sfx.py               # sound-effect cues (cached LLM call) + local synth scripts
 │   ├── video/
 │   │   ├── extractor.py     # frame extraction (+ subtitle download for URLs)
 │   │   ├── dialogue.py      # subtitle transcript extraction (source language)

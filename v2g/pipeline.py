@@ -213,7 +213,7 @@ def run(
         else:
             console.print("[bold cyan]▶ Background music...[/]")
     bgm = generate_music(design, instruct, run_dir)
-    if settings.sfx_model.strip() or settings.tts_model.strip():
+    if settings.sfx_provider.strip():
         console.print("[bold cyan]▶ Sound effects (cue derivation)...[/]")
     sfx = build_sfx(run_dir, design)
 
@@ -250,7 +250,7 @@ def run(
             state = f"disabled after an error ({sfx.generated} clip(s) before the failure)"
         console.print(f"  SFX: {state}")
         log.log(runlog.NOTICE, "SFX: %s", state)
-    elif settings.sfx_model.strip() or settings.tts_model.strip():
+    elif settings.sfx_provider.strip():
         console.print("  [yellow]SFX off — see v2g.log[/]")
 
     return project_path

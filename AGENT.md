@@ -72,7 +72,7 @@ Video (file / URL)
                           │   ├── scene_*.png
                           │   ├── voice/           ← voice-over clips (V2G_TTS_MODEL set)
                           │   ├── bgm/bgm.mp3      ← loopable track (V2G_MUSIC_MODEL set)
-                          │   └── sfx/             ← event + cue clips (V2G_SFX_MODEL set)
+                          │   └── sfx/             ← event + cue clips (V2G_SFX_PROVIDER set)
                           └── game_design.json
 ```
 
@@ -148,7 +148,7 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio; `llm` = the text model writes the synth code (works with no music model, executes model-written Python); `acestep` = local ACE-Step REST |
 | `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
 | `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
-| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (bracketed sound descriptions performed as audio tags); both unset = off |
+| `V2G_SFX_PROVIDER` | — | Sound-effects backend; `llm` = the text model writes one synthesis script per cue, run locally (model-written Python, same machinery as the BGM `llm` provider); unset or unknown = off |
 
 ## Language & dialogue contract
 
@@ -273,7 +273,7 @@ class DialogueChoice:
 | `assets/scene_*.png` | ffmpeg | Additional scene backgrounds for multi-scene videos — untouched frames, source aspect |
 | `assets/voice/<hash>.*` | TTS endpoint | Voice-over clips, one per story line (mp3); the story embeds their paths |
 | `assets/bgm/bgm.mp3` | music endpoint | Loopable background track (only when `V2G_MUSIC_MODEL` is set) |
-| `assets/sfx/*.mp3` | sound-effects endpoint | `select` / `transition` event clips plus per-line cue clips (only when `V2G_SFX_MODEL` is set) |
+| `assets/sfx/*.mp3` | local synthesis (LLM-written scripts) | `select` / `transition` event clips plus per-line cue clips (only when `V2G_SFX_PROVIDER` is set) |
 | `game_design.json` | analyzer | Full design document as project metadata |
 
 After writing files, the generator compile-checks every script with
@@ -584,27 +584,30 @@ built from `atmosphere` + `style` + the stage-2 theme, closing with an
   plain text model behind the model id) → NOTICE in `v2g.log`, project
   ships without music.
 
-**Sound effects** (`v2g/sfx.py`) — two layers, one endpoint:
+**Sound effects** (`v2g/sfx.py`) — two layers, one **local** generator:
 
-- Fixed event clips, fixed audio tags: `select` = `（清脆的电子提示音）`,
-  `transition` = `（快速掠过的嗖声）`; per-line cues come from **ONE cached
-  LLM call** deriving short Chinese **sound descriptions** (沉闷的关门声 /
-  哗哗的大雨 / 急促的脚步声, cap 8 non-empty, `""` = silence, cut at 14
-  characters) — stage 3 reads stages 1/2 only, so no schema or analyzer
-  prompt changes; malformed answers pad/truncate to the script length or
-  fall back to event sounds only.
-- Cues are **descriptions, never text to read**: the serving model is a TTS
-  model, so `_clip` wraps every cue in `（…）` and sends it on the
-  `assistant` turn — an audio tag the model *performs* instead of reading
-  aloud. Verified against the endpoint: a bare description comes back
-  transcribed verbatim (read), the bracketed one comes out as sound.
-  Nothing else is appended (no duration hints).
-- Backend: `V2G_SFX_MODEL` when set, otherwise the voice-over model
-  (`V2G_TTS_MODEL`); both unset = SFX off. Clips land in `assets/sfx/` and
-  cache in `.v2g_cache/sfx/`. The story embeds each cue path per step and
-  `SFX_JSON` carries the event map. The failure taxonomy mirrors
-  voice-over: endpoint-wide problems warn **once** and disable SFX for the
-  run, a bad clip drops only that clip.
+- Fixed event prompts (`select` = 清脆的电子提示音, `transition` = 快速掠过的
+  嗖声); per-line cues come from **ONE cached LLM call** deriving short
+  Chinese **sound descriptions** (沉闷的关门声 / 哗哗的大雨 / 急促的脚步声,
+  cap 8 non-empty, `""` = silence, cut at 40 characters) — stage 3 reads
+  stages 1/2 only, so no schema or analyzer prompt changes; malformed
+  answers pad/truncate to the script length or fall back to event sounds
+  only.
+- Cues are **descriptions of sounds to render, never text to speak**: for
+  each clip the chat model writes a self-contained synthesis script
+  (`v2g.codegen`, the BGM `llm` provider's machinery — the prompt forbids
+  speech outright), the script runs isolated (`python -I`, 60 s timeout) in
+  `work/sfx_llm/` where its source stays for inspection, and ffmpeg turns
+  the WAV into the clip. No audio endpoint is involved, so a cue cannot
+  come back as a voice.
+- Backend: `V2G_SFX_PROVIDER=llm` enables it (the chat model is
+  `V2G_LLM_MODEL`); unset or an unknown value = SFX off. Clips land in
+  `assets/sfx/` and cache in `.v2g_cache/sfx/`. The story embeds each cue
+  path per step and `SFX_JSON` carries the event map. The failure taxonomy
+  mirrors voice-over: a chat failure warns **once** and disables SFX for
+  the run, a bad script drops only that clip — and a bad script served
+  from the response cache is invalidated and refetched once (the
+  `_request_design` policy), so a fluke never sticks across reruns.
 
 ### Scene tree (main.tscn)
 
