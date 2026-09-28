@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from v2g.config import settings
 from v2g.godot import templates as T
 from v2g.llm.analyzer import (
     Character,
@@ -110,3 +111,122 @@ def test_viewport_follows_video_aspect():
     assert T.viewport_for((0, 1080)) == (1280, 720)  # invalid → default
     # Extreme aspect ratio: usable window wins over exact match (letterbox there)
     assert T.viewport_for((8000, 1000)) == (1280, 480)
+
+
+# ── Voice-over + background music ────────────────────────────────────────────
+
+
+class _FakeSynth:
+    """Stands in for v2g.tts.Synthesizer: records what would be spoken."""
+
+    def __init__(self) -> None:
+        self.spoken: list[tuple[str, str]] = []
+
+    def speak(self, text: str, speaker_key: str) -> str | None:
+        if not text.strip():
+            return None
+        self.spoken.append((text, speaker_key))
+        return f"res://assets/voice/{len(self.spoken):02d}.mp3"
+
+
+def test_vn_story_voices_title_dialogue_narration_but_never_the_end_card():
+    synth = _FakeSynth()
+    script = T.vn_manager_script(_design(), None, synth=synth)
+
+    spoken = dict(synth.spoken)
+    assert "Test Game" in spoken  # title, narrator voice
+    assert spoken["Test Game"] == ""
+    assert "那就会招来一纸休书。" in spoken  # dialogue speaks the Chinese line
+    assert spoken["那就会招来一纸休书。"] != ""  # keyed by character, not narrator
+    assert "她悄然回到自己的房间。" in spoken  # narration, narrator voice
+    assert spoken["她悄然回到自己的房间。"] == ""
+    # The end card is UI, not story — it must never be synthesized.
+    assert not any("完 · 按空格" in text for text, _ in synth.spoken)
+    # The runtime reads the embedded paths.
+    assert '"voice": "res://assets/voice/' in script
+    assert "_voice.play()" in script
+
+
+def test_vn_story_without_synth_has_no_voice_paths_but_keeps_player_wiring():
+    script = T.vn_manager_script(_design())
+
+    assert '"voice": "res://assets/voice/' not in script
+    assert "AudioStreamPlayer.new()" in script  # players exist either way
+    assert 'var voice_res: String = step.get("voice", "")' in script
+
+
+def test_vn_story_speaks_the_source_line_in_source_mode(monkeypatch):
+    monkeypatch.setattr(settings, "tts_text", "source")
+    synth = _FakeSynth()
+
+    T.vn_manager_script(_design(), None, synth=synth)
+
+    spoken = dict(synth.spoken)
+    assert "¿Entonces será la carta de repudio?" in spoken  # verbatim source line
+    assert "那就会招来一纸休书。" not in spoken
+    # Narration has no source line — Chinese regardless of mode.
+    assert "她悄然回到自己的房间。" in spoken
+
+
+def test_voice_text_falls_back_across_languages(monkeypatch):
+    assert settings.tts_text == "zh"  # default mode: Chinese first
+    assert T._voice_text("hola", "你好") == "你好"
+    assert T._voice_text("", "旁白") == "旁白"
+    assert T._voice_text("标题", "") == "标题"  # title card: zh empty → es
+
+    monkeypatch.setattr(settings, "tts_text", "source")
+    assert T._voice_text("hola", "你好") == "hola"
+    assert T._voice_text("", "旁白") == "旁白"
+    assert T._voice_text("标题", "") == "标题"
+
+
+def test_vn_story_embeds_bgm_track_and_loops_it():
+    script = T.vn_manager_script(_design(), None, bgm="res://assets/bgm/bgm.mp3")
+
+    assert 'const BGM_RES := "res://assets/bgm/bgm.mp3"' in script
+    assert "mp3.loop = true" in script
+    assert "_bgm.play()" in script
+    assert "_start_bgm()" in script
+
+
+def test_vn_story_without_bgm_keeps_a_silent_player():
+    script = T.vn_manager_script(_design())
+
+    assert 'const BGM_RES := ""' in script
+    # Guard stays in the source: an empty path must never reach load().
+    assert 'if BGM_RES == "":' in script
+
+
+class _FakeSfx:
+    """Stands in for v2g.sfx.Sfx: cue only for the first sample, one event."""
+
+    def step_cue(self, index: int) -> str | None:
+        return "res://assets/sfx/cue_0.mp3" if index == 0 else None
+
+    def event(self, name: str) -> str | None:
+        if name == "select":
+            return "res://assets/sfx/select.mp3"
+        return None  # transition failed to synthesize
+
+
+def test_vn_story_embeds_sfx_cues_and_event_map():
+    script = T.vn_manager_script(_design(), None, sfx=_FakeSfx())
+
+    # Per-step cue lands on the first sample's step, not the title/end card.
+    assert '"sfx": "res://assets/sfx/cue_0.mp3"' in script
+    # Event map: only the clips that were generated appear.
+    assert '"select": "res://assets/sfx/select.mp3"' in script
+    assert '"transition": "res' not in script
+    # Runtime wiring.
+    assert "const SFX_JSON :=" in script
+    assert "func _play_sfx" in script
+    assert "_play_sfx(cue_res)" in script
+    assert 'var select_res: String = sfx_map.get("select", "")' in script
+    assert "_play_sfx(select_res)" in script
+
+
+def test_vn_story_without_sfx_has_an_empty_event_map():
+    script = T.vn_manager_script(_design())
+
+    assert 'const SFX_JSON := """{}"""' in script
+    assert '"sfx": "res://' not in script

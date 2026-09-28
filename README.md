@@ -24,7 +24,7 @@ Stage 2 · rewrite + redraw — with your theme, or none
     ▼
 Stage 3 · generate the game flow and copy
     Visual-novel Godot 4.x project (bilingual VN: source line + Chinese subtitle)
-    voice-over / background music: planned, not implemented yet
+    optional per-line voice-over (TTS) + loopable BGM + sound effects
 ```
 
 Key properties of generated games:
@@ -34,6 +34,15 @@ Key properties of generated games:
 - **Bilingual text**: every line shows the verbatim source-language transcript
   plus a Simplified Chinese subtitle; narration and UI are Chinese-only.
   Source-language text is extracted from the video's subtitles — never invented.
+- **Voice-over + music (optional)**: all three audio layers run against the
+  **same endpoint as the LLM** — `V2G_TTS_MODEL` speaks the narration and
+  every dialogue line (`/audio/speech`); `V2G_MUSIC_MODEL` adds a loopable
+  background track (OpenAI chat-audio format — `V2G_MUSIC_PROVIDER=acestep`
+  falls back to a local ACE-Step server) and `V2G_SFX_MODEL` adds
+  select/transition effects plus per-line sound cues (same chat-audio
+  format, cues derived by one cached LLM call). Each layer is off until its
+  model is set, cached across runs, and can never fail a run — which
+  backend serves a model is your routing concern.
 
 Two analysis modes (both part of stage 1):
 
@@ -67,7 +76,11 @@ Two analysis modes (both part of stage 1):
    `main.tscn`, `vn_manager.gd` story runtime, `game_manager.gd`),
    compile-checks every script (one LLM repair pass, then fallback, on parse
    errors), then runs Godot headless to import assets and self-check.
-   Voice-over and background music are planned but not implemented yet.
+   Voice-over (per-line TTS), background music and sound effects all run
+   against the same endpoint as the LLM — one model variable per layer,
+   off when unset; music also offers a local ACE-Step server as an
+   alternative backend. A failure downgrades to a warning, never a failed
+   run.
 
 ## Prerequisites
 
@@ -144,6 +157,14 @@ All settings via environment variables (or `.env` file):
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
 | `V2G_IMAGEGEN_AB` | — | Per asset, draw text-only and source-referenced candidates and keep the judge's pick (`1` = on; off = reference only) |
 | `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
+| `V2G_TTS_MODEL` | — | Voice-over: `/audio/speech` model on the LLM endpoint (e.g. `gpt-4o-mini-tts`, `tts-1`); unset = off |
+| `V2G_TTS_VOICES` | API defaults | Comma-separated voices; the first speaks narration, characters rotate the rest |
+| `V2G_TTS_TEXT` | `zh` | Spoken text: `zh` = Chinese line (default), `source` = verbatim transcript line, falling back to Chinese |
+| `V2G_MUSIC_MODEL` | — | Background music model: chat audio on the LLM endpoint, or the DiT id for `acestep`; unset = off |
+| `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio on the LLM endpoint; `acestep` = local ACE-Step REST server |
+| `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
+| `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
+| `V2G_SFX_MODEL` | — | Sound effects: chat-completions model routed to an SFX backend on the LLM endpoint; unset = off |
 
 ## Development
 
@@ -173,6 +194,10 @@ v2g/
 │   ├── __main__.py         # CLI
 │   ├── config.py            # settings
 │   ├── pipeline.py          # orchestrator
+│   ├── audio_api.py         # shared chat-completions audio client (trunk endpoint)
+│   ├── tts.py               # voice-over synthesizer (/audio/speech) + assignment
+│   ├── music.py             # BGM: prompt + delivery of one loopable track
+│   ├── sfx.py               # sound-effect cues (cached LLM call) + event clips
 │   ├── video/
 │   │   ├── extractor.py     # frame extraction (+ subtitle download for URLs)
 │   │   ├── dialogue.py      # subtitle transcript extraction (source language)

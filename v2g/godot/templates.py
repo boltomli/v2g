@@ -15,8 +15,14 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from v2g.config import settings
 from v2g.llm.analyzer import GameDesign, match_character, safe_name
+
+if TYPE_CHECKING:
+    from v2g.sfx import Sfx
+    from v2g.tts import Synthesizer
 
 log = logging.getLogger(__name__)
 
@@ -95,9 +101,25 @@ _uid.counter = 0
 # ── Story building (GameDesign → VN steps) ──────────────────────────────────
 
 
+def _voice_text(es: str, zh: str) -> str:
+    """Which text a step's voice-over speaks (``V2G_TTS_TEXT``).
+
+    Default ``zh``: the Chinese line (narration is Chinese anyway, ``line_zh``
+    is always present, and one language keeps voice languages consistent).
+    ``source`` speaks the verbatim transcript line, falling back to Chinese
+    when there is none (narration, title card).
+    """
+    es, zh = es.strip(), zh.strip()
+    if settings.tts_text == "source":
+        return es or zh
+    return zh or es
+
+
 def _build_story(
     design: GameDesign,
     assets: dict[str, Path] | None = None,
+    synth: Synthesizer | None = None,
+    sfx: Sfx | None = None,
 ) -> tuple[list[dict], dict[str, str], dict[str, str], dict[str, str]]:
     """Build (story_steps, bg_textures, portraits, speaker_names) for the VN runtime.
 
@@ -105,7 +127,12 @@ def _build_story(
     - `es` holds ONLY verbatim source-video lines (empty for narration);
     - `zh` holds the Chinese translation / original Chinese narration;
     - choice options follow the same rule (Chinese-only unless verbatim);
-    - background/portrait entries are only emitted for assets that exist.
+    - background/portrait entries are only emitted for assets that exist;
+    - with *synth*, every story step (not the end card) gets a `voice` res
+      path when synthesis succeeds — a missing key means no audio, never an
+      error;
+    - with *sfx*, a step gains an `sfx` res path when its derived cue
+      synthesized (title and end card never carry cues).
     """
     # Backgrounds in play order: main background, then scene stills
     bg_order: list[str] = []
@@ -135,6 +162,10 @@ def _build_story(
         title_step: dict = {"speaker": "", "es": design.title, "zh": ""}
         if bg_order:
             title_step["bg"] = bg_order[0]
+        if synth is not None:
+            title_voice = synth.speak(_voice_text(design.title, ""), "")
+            if title_voice:
+                title_step["voice"] = title_voice
         steps.append(title_step)
 
     for i, ds in enumerate(design.dialogue_samples):
@@ -161,6 +192,15 @@ def _build_story(
             step["choices"] = [
                 {"es": c.line, "zh": c.line_zh, "score": c.score} for c in ds.choices
             ]
+        if synth is not None:
+            # step["speaker"] is "" for narration — the narrator voice.
+            step_voice = synth.speak(_voice_text(step["es"], step["zh"]), step["speaker"])
+            if step_voice:
+                step["voice"] = step_voice
+        if sfx is not None:
+            cue_path = sfx.step_cue(i)
+            if cue_path:
+                step["sfx"] = cue_path
         steps.append(step)
 
     steps.append({"speaker": "", "es": "", "zh": "完 · 按空格或点击重新开始"})
@@ -170,17 +210,34 @@ def _build_story(
 def vn_manager_script(
     design: GameDesign,
     assets: dict[str, Path] | None = None,
+    *,
+    synth: Synthesizer | None = None,
+    bgm: str | None = None,
+    sfx: Sfx | None = None,
 ) -> str:
     """Generate the template-owned visual-novel runtime (vn_manager.gd).
 
     The bilingual story and asset maps are embedded as JSON and parsed at
     runtime. Chinese is the only template-authored UI language.
+
+    *synth* synthesizes each step's voice-over (paths land in the story JSON's
+    ``voice`` keys), *sfx* adds per-step cues plus the fixed event clips
+    (``SFX_JSON``), and *bgm* is the ``res://`` path of the loopable
+    background track (None = no music).
     """
-    story, tex_map, portrait_map, speaker_names = _build_story(design, assets)
+    story, tex_map, portrait_map, speaker_names = _build_story(design, assets, synth, sfx)
     story_json = json.dumps(story, ensure_ascii=False)
     tex_json = json.dumps(tex_map, ensure_ascii=False)
     portrait_json = json.dumps(portrait_map, ensure_ascii=False)
     names_json = json.dumps(speaker_names, ensure_ascii=False)
+    bgm_const = json.dumps(bgm or "")
+    events: dict[str, str] = {}
+    if sfx is not None:
+        for event in ("select", "transition"):
+            path = sfx.event(event)
+            if path:
+                events[event] = path
+    sfx_json = json.dumps(events, ensure_ascii=False)
 
     return f"""\
 extends Control
@@ -194,11 +251,14 @@ const STORY_JSON := \"\"\"{story_json}\"\"\"
 const TEX_JSON := \"\"\"{tex_json}\"\"\"
 const PORTRAIT_JSON := \"\"\"{portrait_json}\"\"\"
 const SPEAKER_JSON := \"\"\"{names_json}\"\"\"
+const BGM_RES := {bgm_const}
+const SFX_JSON := \"\"\"{sfx_json}\"\"\"
 
 var story: Array = []
 var tex_map: Dictionary = {{}}
 var portrait_map: Dictionary = {{}}
 var speaker_names: Dictionary = {{}}
+var sfx_map: Dictionary = {{}}
 
 var game_manager: Node
 var _idx := 0
@@ -215,6 +275,9 @@ var _zh_lbl: Label
 var _score_lbl: Label
 var _hint_lbl: Label
 var _choices: VBoxContainer
+var _voice: AudioStreamPlayer
+var _bgm: AudioStreamPlayer
+var _sfx: AudioStreamPlayer
 var ui_font: SystemFont
 
 func _ready() -> void:
@@ -225,6 +288,9 @@ func _ready() -> void:
     tex_map = JSON.parse_string(TEX_JSON)
     portrait_map = JSON.parse_string(PORTRAIT_JSON)
     speaker_names = JSON.parse_string(SPEAKER_JSON)
+    sfx_map = JSON.parse_string(SFX_JSON)
+    if sfx_map == null:
+        sfx_map = {{}}
     if story == null:
         story = []
     ui_font = SystemFont.new()
@@ -232,6 +298,7 @@ func _ready() -> void:
         "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC", "SimHei",
     ])
     _build_ui()
+    _start_bgm()
     game_manager = get_node("GameManager")
     game_manager.score_changed.connect(
         func(v: int) -> void: _score_lbl.text = "声望: %d" % v)
@@ -367,6 +434,40 @@ func _build_ui() -> void:
     _choices.mouse_filter = Control.MOUSE_FILTER_IGNORE
     _choices.visible = false
 
+    _voice = AudioStreamPlayer.new()
+    _voice.name = "Voice"
+    add_child(_voice)
+
+    _bgm = AudioStreamPlayer.new()
+    _bgm.name = "BGM"
+    add_child(_bgm)
+    _bgm.volume_db = -6.0  # the voice-over sits on top of the music
+
+    _sfx = AudioStreamPlayer.new()
+    _sfx.name = "SFX"
+    add_child(_sfx)
+
+func _start_bgm() -> void:
+    if BGM_RES == "":
+        return
+    var stream := load(BGM_RES) as AudioStream
+    if stream == null:
+        return
+    if stream is AudioStreamMP3:
+        var mp3 := stream as AudioStreamMP3
+        mp3.loop = true
+    _bgm.stream = stream
+    _bgm.play()
+
+func _play_sfx(res_path: String) -> void:
+    if res_path == "":
+        return
+    var stream := load(res_path) as AudioStream
+    if stream == null:
+        return
+    _sfx.stream = stream
+    _sfx.play()
+
 func _flash() -> void:
     _black.modulate = Color(1, 1, 1, 0.55)
     var tw := create_tween()
@@ -384,6 +485,9 @@ func _show_step(i: int) -> void:
                 _bg.texture = load(tex_map[bg_id])
             if _started:
                 _flash()
+                var trans_res: String = sfx_map.get("transition", "")
+                if trans_res != "":
+                    _play_sfx(trans_res)
     _started = true
 
     var sp: String = step.get("sprite", "")
@@ -398,6 +502,18 @@ func _show_step(i: int) -> void:
     _name_lbl.text = speaker_names.get(spk, spk)
     _es_lbl.text = step.get("es", "")
     _zh_lbl.text = step.get("zh", "")
+
+    _voice.stop()
+    var voice_res: String = step.get("voice", "")
+    if voice_res != "":
+        var vstream := load(voice_res) as AudioStream
+        if vstream != null:
+            _voice.stream = vstream
+            _voice.play()
+
+    var cue_res: String = step.get("sfx", "")
+    if cue_res != "":
+        _play_sfx(cue_res)
 
     _clear_choices()
     _awaiting_choice = false
@@ -430,6 +546,9 @@ func _on_choice(i: int) -> void:
     _awaiting_choice = false
     _clear_choices()
     _choices.visible = false
+    var select_res: String = sfx_map.get("select", "")
+    if select_res != "":
+        _play_sfx(select_res)
     var chosen: Dictionary = story[_idx]["choices"][i]
     game_manager.add_score(int(chosen.get("score", 1)))
     _advance_to(_idx + 1)
@@ -443,6 +562,7 @@ func advance() -> void:
     _advance_to(_idx + 1)
 
 func _advance_to(i: int) -> void:
+    _voice.stop()
     _idx = i
     _show_step(_idx)
 

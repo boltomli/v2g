@@ -161,3 +161,50 @@ def media_stage(entry: Path) -> Iterator[Path]:
         shutil.rmtree(stage, ignore_errors=True)
     else:
         stage.rename(entry)
+
+
+# ── Audio artifacts (voice-over clips, background-music tracks) ──────────────
+
+
+def _audio_path(kind: str, material: dict, ext: str) -> Path:
+    """File for one audio artifact: ``.v2g_cache/<kind>/<sha>.<ext>``."""
+    key = hashlib.sha256(
+        json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return _cache_dir() / kind / f"{key}.{ext}"
+
+
+def audio_find(kind: str, material: dict, ext: str) -> Path | None:
+    """Cached audio file, or None when disabled / missing / empty.
+
+    An empty file can only be a partial write — treated as a miss so the
+    caller regenerates instead of shipping a silent clip.
+    """
+    if not settings.media_cache:
+        return None
+    path = _audio_path(kind, material, ext)
+    try:
+        if path.is_file() and path.stat().st_size > 0:
+            log.debug("audio hit %s %.12s…", kind, path.stem)
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def audio_put(kind: str, material: dict, data: bytes, ext: str) -> Path | None:
+    """Store one audio artifact atomically (temp file + rename); None when disabled."""
+    if not settings.media_cache or not data:
+        return None
+    path = _audio_path(kind, material, ext)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".part")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except OSError as e:
+        log.warning("audio cache store failed (%s): %s", kind, e)
+        tmp.unlink(missing_ok=True)
+        return None
+    log.debug("audio store %s %.12s… (%d bytes)", kind, path.stem, len(data))
+    return path
