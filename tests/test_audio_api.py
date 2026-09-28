@@ -179,4 +179,99 @@ def test_opentts_non_404_speech_error_does_not_fall_back(gateway_server, tmp_pat
     with pytest.raises(tts.TTSUnavailable):
         tts.OpenAITTS().synthesize("配音测试", "alloy")
 
-    assert [r["path"] for r in state["requests"]] == ["/v1/audio/speech"]
+    # No chat request: a broken (non-404) speech route never falls back.
+    assert all(r["path"] == "/v1/audio/speech" for r in state["requests"])
+    assert not any(r["path"] == "/v1/chat/completions" for r in state["requests"])
+
+
+# ── Official TTS chat protocol: text on `assistant`, style on `user` ────────
+
+
+def test_chat_speech_puts_text_on_the_assistant_turn(gateway_server, tmp_path, monkeypatch):
+    url, state = gateway_server
+    _settings(monkeypatch, tmp_path, url, tts_voices="mimo_default,冰糖")
+
+    data = audio_api.chat_speech("mimo-v2.5-tts", "夜色落下。")
+
+    assert data == FAKE_MP3
+    assert len(state["requests"]) == 1  # no protocol retry — the shape is the documented one
+    body = state["requests"][0]["body"]
+    assert body["messages"] == [{"role": "assistant", "content": "夜色落下。"}]
+    assert body["audio"] == {"format": "mp3", "voice": "mimo_default"}
+
+
+def test_chat_speech_style_rides_the_user_turn(gateway_server, tmp_path, monkeypatch):
+    url, state = gateway_server
+    _settings(monkeypatch, tmp_path, url)
+
+    audio_api.chat_speech("mimo-v2.5-tts", "太好了！", voice="茉莉", style="用轻快上扬的语调")
+
+    body = state["requests"][0]["body"]
+    assert body["messages"] == [
+        {"role": "user", "content": "用轻快上扬的语调"},
+        {"role": "assistant", "content": "太好了！"},
+    ]
+    assert body["audio"]["voice"] == "茉莉"
+
+
+def test_chat_speech_voice_design_takes_a_description_not_an_id(
+    gateway_server, tmp_path, monkeypatch
+):
+    url, state = gateway_server
+    _settings(monkeypatch, tmp_path, url)
+
+    audio_api.chat_speech(
+        "mimo-v2.5-tts-voicedesign",
+        "夜色落下。",
+        voice="alloy",  # must NOT reach the endpoint
+        style="中年男性，纪录片旁白风格，嗓音低沉带磁性。",
+    )
+
+    body = state["requests"][0]["body"]
+    assert body["messages"] == [
+        {"role": "user", "content": "中年男性，纪录片旁白风格，嗓音低沉带磁性。"},
+        {"role": "assistant", "content": "夜色落下。"},
+    ]
+    assert "voice" not in body["audio"]  # the gateway 400s on audio.voice here
+
+
+def test_chat_speech_voice_design_without_style_still_sends_a_user_turn(
+    gateway_server, tmp_path, monkeypatch
+):
+    url, state = gateway_server
+    _settings(monkeypatch, tmp_path, url)
+
+    # An empty user turn is a 400 ("user message content must not be empty").
+    audio_api.chat_speech("mimo-v2.5-tts-voicedesign", "夜色落下。")
+
+    messages = state["requests"][0]["body"]["messages"]
+    assert messages[0]["role"] == "user" and messages[0]["content"].strip()
+    assert messages[-1] == {"role": "assistant", "content": "夜色落下。"}
+
+
+def test_is_voice_design_matches_the_official_model_ids():
+    assert audio_api.is_voice_design("mimo-v2.5-tts-voicedesign")
+    assert audio_api.is_voice_design("mimo-v2.5-tts-VoiceDesign")
+    assert not audio_api.is_voice_design("mimo-v2.5-tts")
+    assert not audio_api.is_voice_design("mimo-v2.5-tts-voiceclone")
+    assert not audio_api.is_voice_design("gpt-4o-mini-tts")
+
+
+def test_opentts_voice_design_goes_straight_to_chat(gateway_server, tmp_path, monkeypatch):
+    from v2g.llm import client as llm_client
+
+    url, state = gateway_server
+    _settings(monkeypatch, tmp_path, url, tts_model="mimo-v2.5-tts-voicedesign")
+    monkeypatch.setattr(llm_client, "_client", None)
+
+    data = tts.OpenAITTS().synthesize("夜色落下。", "中年男性，纪录片旁白风格。")
+
+    assert data == FAKE_MP3
+    # /audio/speech cannot carry a description — the voice-design protocol is chat-only.
+    assert [r["path"] for r in state["requests"]] == ["/v1/chat/completions"]
+    body = state["requests"][0]["body"]
+    assert body["messages"][0] == {
+        "role": "user",
+        "content": "中年男性，纪录片旁白风格。",
+    }
+    assert "voice" not in body["audio"]

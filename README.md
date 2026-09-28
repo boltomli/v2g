@@ -36,14 +36,15 @@ Key properties of generated games:
   Source-language text is extracted from the video's subtitles — never invented.
 - **Voice-over + music (optional)**: all three audio layers run against the
   **same endpoint as the LLM** — `V2G_TTS_MODEL` speaks the narration and
-  every dialogue line (`/audio/speech`, chat-TTS fallback); `V2G_MUSIC_MODEL`
-  adds a loopable background track (OpenAI chat-audio — or
+  every dialogue line (preset voices via `/audio/speech`, or one designed
+  voice per character + narrator with a `…-voicedesign` model);
+  `V2G_MUSIC_MODEL` adds a loopable background track (OpenAI chat-audio — or
   `V2G_MUSIC_PROVIDER=llm` and the text model *writes* the synth code;
   `acestep` falls back to a local ACE-Step server); the TTS model (or
-  `V2G_SFX_MODEL`) reads out select/transition effects and onomatopoeia
-  cues. Each layer is off until its model is set, cached across runs, and
-  can never fail a run — which backend serves a model is your routing
-  concern.
+  `V2G_SFX_MODEL`) performs select/transition effects and per-line cues from
+  bracketed sound descriptions. Each layer is off until its model is set,
+  cached across runs, and can never fail a run — which backend serves a model
+  is your routing concern.
 
 Two analysis modes (both part of stage 1):
 
@@ -158,14 +159,14 @@ All settings via environment variables (or `.env` file):
 | `V2G_IMAGEGEN_MAX_SIDE` | `1024` | Longest output edge for generated assets |
 | `V2G_IMAGEGEN_AB` | — | Per asset, draw text-only and source-referenced candidates and keep the judge's pick (`1` = on; off = reference only) |
 | `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
-| `V2G_TTS_MODEL` | — | Voice-over model; calls `/audio/speech` and falls back to chat-TTS when that route is missing (e.g. `gpt-4o-mini-tts`, `mimo-v2.5-tts`); unset = off |
-| `V2G_TTS_VOICES` | API defaults | Comma-separated voices; the first speaks narration and sets chat-audio `audio.voice`, characters rotate the rest |
+| `V2G_TTS_MODEL` | — | Voice-over model; `/audio/speech` first (preset voices), documented chat protocol for voice-design models and as fallback (e.g. `gpt-4o-mini-tts`, `mimo-v2.5-tts`, `mimo-v2.5-tts-voicedesign`); unset = off |
+| `V2G_TTS_VOICES` | API defaults | Preset mode: comma-separated voices; the first speaks narration and sets chat-audio `audio.voice`, characters rotate the rest. Ignored for voice-design models (voices are derived from the design) |
 | `V2G_TTS_TEXT` | `zh` | Spoken text: `zh` = Chinese line (default), `source` = verbatim transcript line, falling back to Chinese |
 | `V2G_MUSIC_MODEL` | — | Background music model: chat audio (`api`), the code-writing text model (`llm`), or the DiT id (`acestep`); unset = off |
 | `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio; `llm` = the text model writes the synth code (works with no music model, executes model-written Python); `acestep` = local ACE-Step REST |
 | `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
 | `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
-| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (vocal onomatopoeia cues); both unset = off |
+| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (bracketed sound descriptions performed as audio tags); both unset = off |
 
 ## Development
 

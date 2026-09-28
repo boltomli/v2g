@@ -570,6 +570,22 @@ def match_character(speaker: str, characters: list[Character]) -> int | None:
     return best if best_score >= 0.5 else None
 
 
+def speaker_key(sample: DialogueSample, characters: list[Character]) -> str:
+    """VN story key for *sample*: ``""`` = narration, else a character key.
+
+    The rule templates render the story with and voice design keys its
+    voices by — both must agree or a speaker's portrait, name and voice
+    drift apart: narration (no line, no speaker) is ``""``; a dialogue
+    speaker resolves to ``safe_name(character.name)`` when it matches a
+    character (aliases, substrings, token overlap via :func:`match_character`),
+    otherwise to its own safe name.
+    """
+    if not sample.line.strip() or not sample.speaker.strip():
+        return ""
+    idx = match_character(sample.speaker, characters)
+    return safe_name(characters[idx].name) if idx is not None else safe_name(sample.speaker)
+
+
 def _reorder(before: list, after: list, *, by_face: bool = False) -> list:
     """Put the rewritten entity list back into the source list's order.
 

@@ -196,7 +196,9 @@ def run(
     log.log(runlog.NOTICE, "Stage 2: re-skin + redraw done (style: %.80s)", design.style or "-")
 
     # ── Stage 3: voice-over + music + sound effects, then generate ──────────
-    synth = build_synth(run_dir)
+    # Voice design derives from the *rewritten* design: stage-2 renames would
+    # otherwise leave speaker keys pointing at voices derived from old names.
+    synth = build_synth(run_dir, design)
     if synth is not None:
         console.print(f"[bold cyan]▶ Voice-over:[/] {settings.tts_model} ({settings.tts_text})")
     if settings.music_model.strip():

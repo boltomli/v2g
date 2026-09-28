@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from v2g.config import settings
-from v2g.llm.analyzer import GameDesign, match_character, safe_name
+from v2g.llm.analyzer import GameDesign, safe_name, speaker_key
 
 if TYPE_CHECKING:
     from v2g.sfx import Sfx
@@ -172,20 +172,16 @@ def _build_story(
         step: dict = {}
         if bg_order:
             step["bg"] = bg_order[min(i * len(bg_order) // max(n, 1), len(bg_order) - 1)]
-        is_dialogue = bool(ds.line.strip()) and bool(ds.speaker.strip())
-        if is_dialogue:
-            idx = match_character(ds.speaker, design.characters)
-            key = (
-                safe_name(design.characters[idx].name) if idx is not None else safe_name(ds.speaker)
-            )
-            step["speaker"] = key
+        key = speaker_key(ds, design.characters)
+        step["speaker"] = key
+        # Dialogue row (line + speaker): it may still key to "" for a
+        # degenerate name — setdefault/sprite checks then no-op as before.
+        if ds.line.strip() and ds.speaker.strip():
             speaker_names.setdefault(key, ds.speaker)
             if key in portrait_map:
                 step["sprite"] = key
             if not ds.line_zh.strip():
                 log.warning("Dialogue missing line_zh (Chinese subtitle): %r", ds.line[:80])
-        else:
-            step["speaker"] = ""
         step["es"] = ds.line
         step["zh"] = ds.line_zh
         if ds.choices:

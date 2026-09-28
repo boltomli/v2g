@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 
 _CHAT_TIMEOUT = 300.0  # audio generation is synchronous on this endpoint
 _AUDIO_VOICE = "alloy"  # required by the OpenAI `audio` param; irrelevant to music
+_NEUTRAL_DESIGN = "自然中性的嗓音，吐字清晰，语速中等。"  # voice-design needs SOME description
 
 
 class AudioAPIError(Exception):
@@ -134,14 +135,39 @@ def _post_chat(payload: dict) -> tuple[int, bytes]:
         raise AudioAPIError(f"endpoint unreachable: {e.reason}") from e
 
 
-def chat_audio(model: str, prompt: str, *, voice: str | None = None) -> bytes:
-    """One clip for *prompt* from the trunk endpoint, OpenAI format → mp3 bytes.
+def is_voice_design(model: str) -> bool:
+    """True for voice-design models (``mimo-v2.5-tts-voicedesign``).
 
-    ``voice`` defaults to the first ``V2G_TTS_VOICES`` entry (gateways name
-    their own voices), else ``alloy``. Some TTS-model gateways reject
-    user-only conversations ("messages must contain an assistant role") —
-    such a 400 is retried once with the prompt mirrored into an assistant
-    turn, which is their read-this-text protocol.
+    They build the voice from a natural-language description carried in the
+    ``user`` turn and reject a preset ``audio.voice`` id outright
+    (``audio.voice is not supported for voice design model``).
+    """
+    return "voicedesign" in model.lower().replace("-", "").replace("_", "")
+
+
+def _finish_chat(status: int, raw: bytes) -> bytes:
+    """Shared response tail: HTTP status → JSON → audio → mp3 bytes."""
+    if status != 200:
+        detail = raw[:300].decode("utf-8", errors="replace").replace("\n", " ")
+        raise AudioAPIError(f"chat/completions → HTTP {status}: {detail}")
+    try:
+        body = json.loads(raw)
+    except ValueError as e:
+        raise AudioAPIError("non-JSON response from the chat endpoint") from e
+    data, mime = _audio_payload(body)
+    return _to_mp3(data, mime)
+
+
+def chat_audio(model: str, prompt: str, *, voice: str | None = None) -> bytes:
+    """One instruction clip (BGM) for *prompt* from the trunk endpoint → mp3 bytes.
+
+    The prompt travels as a ``user`` turn — it is a direction, not spoken
+    text. Voice-over and sound effects use :func:`chat_speech` instead,
+    which follows the documented text-to-speech turn shape. ``voice``
+    defaults to the first ``V2G_TTS_VOICES`` entry (gateways name their own
+    voices), else ``alloy``; some gateways reject user-only conversations
+    ("messages must contain an assistant role") — such a 400 is retried
+    once with the prompt mirrored into an assistant turn.
 
     Raises :class:`AudioAPIError` for every failure mode (bad transport,
     non-audio answer, unparsable payload) — never a raw urllib exception;
@@ -163,13 +189,52 @@ def chat_audio(model: str, prompt: str, *, voice: str | None = None) -> bytes:
     if status == 400 and b"assistant" in raw:
         payload["messages"] = payload["messages"] + [{"role": "assistant", "content": prompt}]
         status, raw = _post_chat(payload)
-    if status != 200:
-        detail = raw[:300].decode("utf-8", errors="replace").replace("\n", " ")
-        raise AudioAPIError(f"chat/completions → HTTP {status}: {detail}")
-    try:
-        body = json.loads(raw)
-    except ValueError as e:
-        raise AudioAPIError("non-JSON response from the chat endpoint") from e
+    return _finish_chat(status, raw)
 
-    data, mime = _audio_payload(body)
-    return _to_mp3(data, mime)
+
+def chat_speech(
+    model: str,
+    text: str,
+    *,
+    voice: str | None = None,
+    style: str | None = None,
+) -> bytes:
+    """One spoken clip from the trunk endpoint → mp3 bytes, official TTS protocol.
+
+    Turn shape follows the vendor's documented format (verified live): the
+    ``assistant`` turn carries *text* — the line to speak — and the optional
+    ``user`` turn carries *style*: a voice description for a voice-design
+    model, a tone/direction note for a preset-voice model. Preset-voice
+    models speak with just the ``assistant`` turn; voice-design models
+    *require* the ``user`` turn (an empty one is a 400), so a neutral
+    description stands in when the caller passes no ``style``.
+
+    ``voice`` is a preset voice id for ``audio.voice`` and is **omitted for
+    voice-design models**, which take the voice from ``style`` and 400 on an
+    id (see :func:`is_voice_design`).
+
+    Raises :class:`AudioAPIError` for every failure mode (bad transport,
+    non-audio answer, unparsable payload) — never a raw urllib exception;
+    HTTP error bodies (bounded) ride the message so misconfiguration is
+    visible in the run log.
+    """
+    designed = is_voice_design(model)
+    style = (style or "").strip()
+    if designed and not style:
+        style = _NEUTRAL_DESIGN
+    messages: list[dict] = []
+    if style:
+        messages.append({"role": "user", "content": style})
+    messages.append({"role": "assistant", "content": text})
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "modalities": ["text", "audio"],
+        "audio": {"format": "mp3"},
+    }
+    if not designed:
+        configured = [v.strip() for v in settings.tts_voices.split(",") if v.strip()]
+        payload["audio"]["voice"] = voice or (configured[0] if configured else _AUDIO_VOICE)
+    status, raw = _post_chat(payload)
+    return _finish_chat(status, raw)

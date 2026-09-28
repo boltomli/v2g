@@ -141,14 +141,14 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_CHUNK_DURATION` | `60` | Seconds per analysis chunk (detail mode; must be ≤ `V2G_MAX_DURATION`) |
 | `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB per chunk |
-| `V2G_TTS_MODEL` | — | Voice-over model; calls `/audio/speech` and falls back to chat-TTS when that route is missing (e.g. `gpt-4o-mini-tts`, `mimo-v2.5-tts`); unset = off |
-| `V2G_TTS_VOICES` | API defaults | Comma-separated voices; the first speaks narration and sets chat-audio `audio.voice`, characters rotate the rest |
+| `V2G_TTS_MODEL` | — | Voice-over model; `/audio/speech` first (preset voices), documented chat protocol for voice-design models and as fallback (e.g. `gpt-4o-mini-tts`, `mimo-v2.5-tts`, `mimo-v2.5-tts-voicedesign`); unset = off |
+| `V2G_TTS_VOICES` | API defaults | Preset mode: comma-separated voices; the first speaks narration and sets chat-audio `audio.voice`, characters rotate the rest. Ignored for voice-design models (voices are derived from the design) |
 | `V2G_TTS_TEXT` | `zh` | Spoken text: `zh` = Chinese line (default), `source` = verbatim transcript line, falling back to Chinese |
 | `V2G_MUSIC_MODEL` | — | Background music model: chat audio (`api`), the code-writing text model (`llm`), or the DiT id (`acestep`); unset = off |
 | `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio; `llm` = the text model writes the synth code (works with no music model, executes model-written Python); `acestep` = local ACE-Step REST |
 | `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
 | `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
-| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (vocal onomatopoeia cues); both unset = off |
+| `V2G_SFX_MODEL` | — | Sound-effects model override; unset = rides `V2G_TTS_MODEL` (bracketed sound descriptions performed as audio tags); both unset = off |
 
 ## Language & dialogue contract
 
@@ -509,20 +509,34 @@ audio.
 **Voice-over** (`v2g/tts.py`) — synthesizes the narration, every dialogue
 line and the title card; the end card and choice options are never spoken.
 
-- Backend: `POST <V2G_LLM_BASE_URL>/audio/speech` with the trunk key and the
-  model from `V2G_TTS_MODEL` (**unset = off**). When the endpoint has no
-  such route (some gateways serve TTS only through chat completions) it
-  **falls back to the chat-TTS protocol** in `v2g.audio_api` — same
-  OpenAI chat shape as BGM/SFX, including the one-shot assistant-message
-  retry gateways like Xiaomi's token-plan require. Zero new dependencies;
-  which vendor actually serves the model is the user's routing concern.
+- Backend: the trunk endpoint with the model from `V2G_TTS_MODEL`
+  (**unset = off**), two protocols (`v2g.audio_api`):
+  `POST <V2G_LLM_BASE_URL>/audio/speech` first for preset-voice models, and
+  the **documented chat-TTS protocol** `chat_speech` — text on the
+  `assistant` turn, optional style/voice description on the `user` turn,
+  `audio.voice` for preset ids. `chat_speech` is the *only* path for
+  voice-design models and the fallback when `/audio/speech` is missing
+  (some gateways serve TTS only through chat completions). Zero new
+  dependencies; which vendor serves the model is the user's routing concern.
   To support another backend, subclass `TTSProvider` and wire it into
   `build_synth` — the rest of the pipeline only ever sees a `Synthesizer`.
 - Text: `V2G_TTS_TEXT=zh` (default) speaks `line_zh`; `source` speaks the
   verbatim transcript line and falls back to Chinese.
-- Voices: `V2G_TTS_VOICES` (default = the endpoint's standard list); the
-  first voice is the narrator **and** sets chat-audio `audio.voice`, every
-  speaker rotates the rest in first-appearance order (stable within a run).
+- Voices — two assignment modes:
+  - **preset** (`V2G_TTS_VOICES`, default = the endpoint's standard list):
+    the first voice is the narrator **and** sets chat-audio `audio.voice`,
+    every speaker rotates the rest in first-appearance order (stable within
+    a run).
+  - **voice design** (model id contains `voicedesign`, e.g.
+    `mimo-v2.5-tts-voicedesign`): one cached LLM call derives a 1–2
+    sentence voice description per speaker from the finished design —
+    narrator plus every character, keyed exactly like the story's speaker
+    keys (:func:`v2g.llm.analyzer.speaker_key`) — so each role and the
+    narrator get a distinct, personality-fitting voice. The description
+    rides the `user` turn; `audio.voice` is omitted (the endpoint 400s on
+    an id: `audio.voice is not supported for voice design model`). A failed
+    derivation falls back to one default description, never to preset ids.
+    `V2G_TTS_VOICES` is ignored in this mode.
 - Synthesis happens inside `_build_story` — the single place that knows
   which steps are voiceable. Each clip lands in `assets/voice/<hash>.*` and
   the step gains a `voice` key; clips are content-addressed in
@@ -572,15 +586,19 @@ built from `atmosphere` + `style` + the stage-2 theme, closing with an
 
 **Sound effects** (`v2g/sfx.py`) — two layers, one endpoint:
 
-- Fixed event clips with fixed vocal words: `select` = 叮——, `transition` =
-  嗖——; per-line cues come from **ONE cached LLM call** deriving short
-  Chinese **onomatopoeia** (拟声词: 咚咚咚 / 哗啦啦 / 轰隆隆, cap 8 non-empty,
-  `""` = silence) — stage 3 reads stages 1/2 only, so no schema or analyzer
+- Fixed event clips, fixed audio tags: `select` = `（清脆的电子提示音）`,
+  `transition` = `（快速掠过的嗖声）`; per-line cues come from **ONE cached
+  LLM call** deriving short Chinese **sound descriptions** (沉闷的关门声 /
+  哗哗的大雨 / 急促的脚步声, cap 8 non-empty, `""` = silence, cut at 14
+  characters) — stage 3 reads stages 1/2 only, so no schema or analyzer
   prompt changes; malformed answers pad/truncate to the script length or
   fall back to event sounds only.
-- Cues are vocal **because the serving model is a TTS model**: it READS
-  whatever we send, so descriptions would be spoken aloud — hence sound
-  words, sent verbatim (no prompt decoration, no duration hints).
+- Cues are **descriptions, never text to read**: the serving model is a TTS
+  model, so `_clip` wraps every cue in `（…）` and sends it on the
+  `assistant` turn — an audio tag the model *performs* instead of reading
+  aloud. Verified against the endpoint: a bare description comes back
+  transcribed verbatim (read), the bracketed one comes out as sound.
+  Nothing else is appended (no duration hints).
 - Backend: `V2G_SFX_MODEL` when set, otherwise the voice-over model
   (`V2G_TTS_MODEL`); both unset = SFX off. Clips land in `assets/sfx/` and
   cache in `.v2g_cache/sfx/`. The story embeds each cue path per step and

@@ -119,9 +119,13 @@ def test_event_and_cue_clips_land_in_project_and_cache(audio_server, tmp_path, m
     assert body["model"] == "sfx-xl"
     assert body["modalities"] == ["text", "audio"]
     assert body["audio"] == {"format": "mp3", "voice": "alloy"}
-    assert "duration" not in body  # the TTS model reads text verbatim — no spoken hints
-    assert body["messages"][0]["content"] == "叮——"  # vocal event word, exactly
+    assert "duration" not in body  # no spoken hints — the tag performs itself
+    # The cue is an audio tag on the assistant turn: described, not read aloud.
+    assert body["messages"] == [{"role": "assistant", "content": "（清脆的电子提示音）"}]
     assert len(state["requests"]) == 2
+    assert state["requests"][1]["body"]["messages"] == [
+        {"role": "assistant", "content": "（door knock）"}
+    ]
 
     # A fresh builder (rerun): the audio cache answers — no new requests.
     rerun = sfx.Sfx(tmp_path / "run2" / "assets" / "sfx")
@@ -214,3 +218,24 @@ def test_derive_cues_caps_non_empty_entries(monkeypatch):
     assert cues is not None
     assert len(cues) == n
     assert sum(1 for c in cues if c) == sfx._MAX_CUES
+
+
+# ── Audio tags: described once, never read aloud ────────────────────────────
+
+
+def test_clip_wraps_the_cue_in_an_audio_tag(audio_server, tmp_path, monkeypatch):
+    url, state = audio_server
+    _settings(monkeypatch, tmp_path, url)
+    builder = sfx.Sfx(tmp_path / "assets" / "sfx")
+    builder.cues = ["沉闷的关门声", "（哗哗的大雨）", "x" * 40]
+
+    assert builder.step_cue(0) is not None
+    assert builder.step_cue(1) is not None
+    assert builder.step_cue(2) is not None
+
+    sent = [r["body"]["messages"] for r in state["requests"]]
+    # Bracketed once, even when the LLM already bracketed it…
+    assert sent[0] == [{"role": "assistant", "content": "（沉闷的关门声）"}]
+    assert sent[1] == [{"role": "assistant", "content": "（哗哗的大雨）"}]
+    # …and long descriptions are cut: a 40-char tag synthesizes a ~20 s clip.
+    assert sent[2] == [{"role": "assistant", "content": f"（{'x' * sfx._MAX_CUE_CHARS}）"}]

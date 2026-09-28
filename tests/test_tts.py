@@ -4,6 +4,8 @@ from pathlib import Path
 
 from v2g import tts
 from v2g.config import settings
+from v2g.llm.analyzer import Character, DialogueSample, GameDesign
+from v2g.llm.client import ChatResult
 
 
 class FakeProvider(tts.TTSProvider):
@@ -111,3 +113,106 @@ def test_build_synth_follows_the_model_switch(tmp_path, monkeypatch):
     built = tts.build_synth(tmp_path)
     assert built is not None
     assert built.provider.name == "api"
+    assert built.voice_designs is None  # preset model → preset voices
+
+
+# ── Voice design: one described voice per speaker ───────────────────────────
+
+
+def _design() -> GameDesign:
+    return GameDesign(
+        title="T",
+        genre="vn",
+        summary="s",
+        mechanics=[],
+        controls=[],
+        style="cinematic",
+        objects=[],
+        characters=[Character(name="林檎", role="主角", visual="红发")],
+        dialogue_samples=[
+            DialogueSample(speaker="", line="", line_zh="夜色落下。"),
+            DialogueSample(speaker="林檎", line="go", line_zh="我们走吧。"),
+        ],
+    )
+
+
+def test_voice_design_assigns_a_description_per_speaker(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "output_root", tmp_path)
+    provider = FakeProvider()
+    synth = tts.Synthesizer(
+        provider,
+        tmp_path / "run" / "assets" / "voice",
+        voice_designs={
+            "": "中年男性，纪录片旁白风格，嗓音沉稳。",
+            "林檎": "元气满满的少女，声线清脆，语尾上扬。",
+        },
+    )
+
+    assert synth.voice_for("") == "中年男性，纪录片旁白风格，嗓音沉稳。"
+    assert synth.voice_for("林檎") == "元气满满的少女，声线清脆，语尾上扬。"
+    # A speaker without its own card borrows the narrator's, never an id.
+    assert synth.voice_for("未设计的角色") == synth.voice_for("")
+
+    path = synth.speak("我们走吧。", "林檎")
+    assert path is not None
+    # The description reaches the provider — it is this run's voice spec.
+    assert provider.calls == [("我们走吧。", "元气满满的少女，声线清脆，语尾上扬。")]
+
+
+def test_voice_designs_fall_back_to_the_default_when_derivation_failed(tmp_path):
+    provider = FakeProvider()
+    synth = tts.Synthesizer(provider, tmp_path / "run" / "assets" / "voice", voice_designs={})
+
+    assert synth.voice_for("") == tts._DEFAULT_VOICE_DESIGN
+    assert synth.speak("夜色落下。", "") is not None
+
+
+def test_derive_voice_designs_parses_and_normalizes_keys(monkeypatch):
+    answer = (
+        '{"voices": {"": "旁白卡", "林檎": "少女卡",'
+        ' "Narrator": "被覆盖的旁白", "unknown": "忽略"}}'
+    )
+    monkeypatch.setattr(tts, "chat", lambda *a, **k: ChatResult(answer, False, "k"))
+    designs = tts.derive_voice_designs(_design())
+
+    assert designs is not None
+    # Keys come back as the story uses them: "" for narration, safe_name form.
+    assert designs[""] == "旁白卡"
+    assert designs["林檎"] == "少女卡"
+    assert "unknown" not in designs
+
+    # Narrator missing → default card, never an empty user turn downstream.
+    monkeypatch.setattr(tts, "chat", lambda *a, **k: ChatResult('{"林檎": "少女卡"}', False, "k"))
+    designs = tts.derive_voice_designs(_design())
+    assert designs is not None
+    assert designs[""] == tts._DEFAULT_VOICE_DESIGN
+
+    # Unusable output / chat failure → None (the caller ships a default card).
+    monkeypatch.setattr(tts, "chat", lambda *a, **k: ChatResult("no json", False, "k"))
+    assert tts.derive_voice_designs(_design()) is None
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(tts, "chat", _boom)
+    assert tts.derive_voice_designs(_design()) is None
+
+
+def test_build_synth_derives_voices_for_voice_design_models(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "output_root", tmp_path)
+    monkeypatch.setattr(settings, "llm_api_key", "sk")
+
+    # Voice-design model → one derivation call, cards keyed like the story.
+    monkeypatch.setattr(settings, "tts_model", "mimo-v2.5-tts-voicedesign")
+    monkeypatch.setattr(
+        tts, "chat", lambda *a, **k: ChatResult('{"voices": {"": "旁白卡"}}', False, "k")
+    )
+    built = tts.build_synth(tmp_path, _design())
+    assert built is not None
+    assert built.voice_designs == {"": "旁白卡"}
+
+    # Derivation failure → one default card, still a working synthesizer.
+    monkeypatch.setattr(tts, "chat", lambda *a, **k: ChatResult("junk", False, "k"))
+    built = tts.build_synth(tmp_path, _design())
+    assert built is not None
+    assert built.voice_designs == {"": tts._DEFAULT_VOICE_DESIGN}

@@ -2,11 +2,15 @@
 
 Two layers, one endpoint: clips come from the trunk chat-audio endpoint with
 ``V2G_SFX_MODEL``, **falling back to the voice-over model**
-(``V2G_TTS_MODEL``) — both unset = SFX off. Since the serving model is a
-TEXT-TO-SPEECH model, cues are Chinese onomatopoeia a voice can perform
-(咚咚咚 / 哗啦啦 / 叮——), never descriptions: whatever we send gets read
-aloud. Which backend actually serves the model is the user's routing concern
-(see :mod:`v2g.audio_api`).
+(``V2G_TTS_MODEL``) — both unset = SFX off.
+
+The serving model is a TEXT-TO-SPEECH model: whatever it is asked to say
+gets *read aloud*. A cue therefore never travels as text to speak — it
+travies as a **description wrapped in （…）** in the ``assistant`` turn, which
+the model performs as an audio tag instead of reading verbatim (verified
+against the endpoint: bare descriptions are transcribed back verbatim,
+bracketed ones come out as sound). Which backend actually serves the model
+is the user's routing concern (see :mod:`v2g.audio_api`).
 
 The per-line cues are derived from the finished design by ONE cached LLM
 call — stage 3 reads stages 1/2, so no schema or analyzer prompt changes.
@@ -30,29 +34,35 @@ from v2g.llm.client import ChatResult, chat
 log = logging.getLogger(__name__)
 
 _MAX_CUES = 8  # cap on non-empty content cues per script
+_MAX_CUE_CHARS = 14  # a longer description synthesizes a clip tens of seconds long
 _EVENT_PROMPTS = {
-    # Vocal (TTS-read) sound words: the gateway's TTS model performs them.
-    "select": "叮——",
-    "transition": "嗖——",
+    # Bracketed sound descriptions — `_clip` performs （…） instead of reading it.
+    "select": "（清脆的电子提示音）",
+    "transition": "（快速掠过的嗖声）",
 }
 
 _SFX_SYSTEM = """\
 You are the sound designer for a visual novel. You receive a game design JSON;
 `dialogue_samples` is the full script in play order.
 
-The sound effects are spoken by a TEXT-TO-SPEECH model, so cues must be
-short Chinese onomatopoeia (拟声词) a voice can perform — never descriptions.
+The sound effects are synthesized by a text-to-speech model from a SHORT
+DESCRIPTION of the sound, wrapped by the pipeline in （…） — the model
+performs the described sound instead of reading words aloud. So each cue
+names what is heard: material, source, motion — never a word meant to be
+spoken, never a sentence.
 
 Return ONLY a JSON array of strings, EXACTLY as long as `dialogue_samples`,
 one entry per sample in order. Each entry is either:
 - "" (no sound — the default), or
-- one onomatopoeia phrase of 2–8 characters, e.g. 咚咚咚 / 哗啦啦 /
-  轰隆隆 / 叮咚 / 咔嚓 / 汪汪.
+- one sound description of 4–14 Chinese characters WITHOUT brackets,
+  e.g. 沉闷的关门声 / 哗哗的大雨 / 急促的脚步声 / 玻璃碎裂声 /
+  远处的雷声.
 
 Rules:
 - At most 8 non-empty entries overall; prefer silence.
-- Pure sound words only: no descriptions, no sentences, no music notation,
-  no explanation — anything written gets read aloud.
+- Describe the sound itself (source + texture), not its cause and not a
+  feeling: no sentences, no dialogue, no music directions, no （） brackets
+  — the pipeline adds those.
 - The sound must follow from the line, its `context` or the atmosphere, and
   never contradict the story.
 - Output raw JSON only: no markdown fences, no commentary.
@@ -128,13 +138,17 @@ class Sfx:
     def _clip(self, text: str, stem: str) -> str | None:
         """Synthesize one clip into ``assets/sfx/<stem>.mp3`` → res path or None.
 
-        The text reaches the TTS model verbatim — no prompt decoration and no
-        duration hints: the model READS whatever it is given, so anything
-        appended would be spoken aloud.
+        The cue is wrapped in （…） and sent as the ``assistant`` turn — an
+        audio tag the model *performs*, not text it reads back verbatim.
+        Nothing else is appended (no duration hints): whatever else we add
+        becomes part of the performance.
         """
-        text = text.strip()
+        text = text.strip().strip("（）()[]").strip()
         if not text or not self.enabled or not self.model:
             return None
+        if len(text) > _MAX_CUE_CHARS:
+            text = text[:_MAX_CUE_CHARS]
+        text = f"（{text}）"
         if text in self._by_text:
             return self._by_text[text]
         material = {
@@ -147,7 +161,7 @@ class Sfx:
             if found is not None:
                 data = found.read_bytes()
             else:
-                data = audio_api.chat_audio(self.model, text)
+                data = audio_api.chat_speech(self.model, text)
                 if not data:
                     log.debug("Sound effect endpoint returned no audio for %r", text[:60])
                     return None
