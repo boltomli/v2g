@@ -167,6 +167,27 @@ def _build_story(
     return steps, tex_map, portrait_map, speaker_names
 
 
+def _gd_const(name: str, value: str) -> str:
+    """A GDScript ``const NAME := \"\"\"…\"\"\"`` whose *value* is exactly *value*.
+
+    GDScript resolves escape sequences inside its string literals *before* the
+    engine ever sees the text, so raw JSON pasted into a triple-quoted string is
+    silently rewritten on the way in: JSON's ``\\"`` (an escaped quote) becomes a
+    bare quote that ends the JSON string, and JSON's ``\\\\`` (an escaped
+    backslash) collapses to one backslash. Measured on Godot 4.7: a story line
+    containing an ASCII quote made ``JSON.parse_string`` return null, so the
+    game booted to the empty-story card "（无剧本）" while reporting no error at
+    all — and a Windows-looking path in any field lost its separators.
+
+    Escaping backslashes first and quotes second yields a literal that decodes
+    back to the original text, so no story content can reach the runtime
+    mangled. ``json.dumps`` never emits a raw newline, so every control
+    character is already backslash-escaped and covered by the first pass.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'const {name} := """{escaped}"""'
+
+
 def vn_manager_script(
     design: GameDesign,
     assets: dict[str, Path] | None = None,
@@ -177,10 +198,15 @@ def vn_manager_script(
     runtime. Chinese is the only template-authored UI language.
     """
     story, tex_map, portrait_map, speaker_names = _build_story(design, assets)
-    story_json = json.dumps(story, ensure_ascii=False)
-    tex_json = json.dumps(tex_map, ensure_ascii=False)
-    portrait_json = json.dumps(portrait_map, ensure_ascii=False)
-    names_json = json.dumps(speaker_names, ensure_ascii=False)
+    consts = "\n".join(
+        _gd_const(name, json.dumps(value, ensure_ascii=False))
+        for name, value in (
+            ("STORY_JSON", story),
+            ("TEX_JSON", tex_map),
+            ("PORTRAIT_JSON", portrait_map),
+            ("SPEAKER_JSON", speaker_names),
+        )
+    )
 
     return f"""\
 extends Control
@@ -190,10 +216,7 @@ extends Control
 #   - `es` lines are verbatim transcripts of the source video (may be empty),
 #   - `zh` lines are the target language (Simplified Chinese subtitles/narration).
 
-const STORY_JSON := \"\"\"{story_json}\"\"\"
-const TEX_JSON := \"\"\"{tex_json}\"\"\"
-const PORTRAIT_JSON := \"\"\"{portrait_json}\"\"\"
-const SPEAKER_JSON := \"\"\"{names_json}\"\"\"
+{consts}
 
 var story: Array = []
 var tex_map: Dictionary = {{}}
