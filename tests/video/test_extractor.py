@@ -69,6 +69,21 @@ def _fake_yt_dlp(
     return run, calls
 
 
+def test_bitrate_budget_follows_the_clip_not_the_global_cap():
+    """Regression: the bitrate was sized against ``V2G_MAX_DURATION`` (or the
+    nominal chunk length) instead of the clip's own duration, so a clip shorter
+    than the cap was compressed as if it filled the whole window — throwing away
+    the bitrate the size cap had already paid for."""
+    # 20 MB in 30 s → the whole budget is available over 30 s
+    assert extractor._target_bitrate_kbps(20, 30) == pytest.approx(20 * 8 * 1024 / 30, rel=1e-3)
+    # the same cap budgeted over a 120 s window yields a quarter of the bitrate
+    assert extractor._target_bitrate_kbps(20, 30) == pytest.approx(
+        4 * extractor._target_bitrate_kbps(20, 120), rel=1e-3
+    )
+    # degenerate durations must not divide by zero
+    assert extractor._target_bitrate_kbps(20, 0) > 0
+
+
 @_FFMPEG_REQUIRED
 def test_compression_produces_encoder_compatible_dimensions(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "output_root", tmp_path / "out")

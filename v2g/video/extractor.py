@@ -193,14 +193,17 @@ def extract_keyframes(
     _run_scene_extract(video_path, out_dir, threshold)
     frames = sorted(out_dir.glob("frame_*.png"))
 
-    # If too many frames, re-extract with higher threshold
+    # If too many frames, re-extract with higher threshold. Each retry decodes
+    # the whole video again, so a pass that does not actually shed frames ends
+    # the sweep — the even-spacing fallback below reaches the budget for free.
     attempts = 0
     while len(frames) > max_frames and attempts < 4:
         threshold = min(threshold + 0.15, 0.95)
         attempts += 1
+        previous = len(frames)
         log.info(
             "  %d frames > %d, raising threshold to %.2f (attempt %d)",
-            len(frames),
+            previous,
             max_frames,
             threshold,
             attempts,
@@ -210,6 +213,13 @@ def extract_keyframes(
             f.unlink()
         _run_scene_extract(video_path, out_dir, threshold)
         frames = sorted(out_dir.glob("frame_*.png"))
+        if len(frames) >= previous:
+            log.info(
+                "  Threshold %.2f kept %d frames (no reduction) — stopping the sweep",
+                threshold,
+                len(frames),
+            )
+            break
 
     # If still too many, keep evenly-spaced subset
     if len(frames) > max_frames:
@@ -272,6 +282,19 @@ def _run_scene_extract(video_path: Path, out_dir: Path, threshold: float) -> Non
 
 
 # ── Video segmentation (for long videos in detail mode) ──────────────────────
+
+
+def _target_bitrate_kbps(cap_mb: float, seconds: float) -> int:
+    """Video bitrate (kbps) that fits *seconds* of video into *cap_mb*.
+
+    Budgeted over the clip's OWN length, never over ``V2G_MAX_DURATION`` or the
+    nominal chunk size: a 30 s clip compressed as if it filled a 120 s window
+    gets a quarter of the bitrate the size cap already allows, and the quality
+    is gone before the lossless splitter ever runs. Audio is budgeted separately
+    (``-b:a 64k``), so a piece may still overshoot slightly — that overshoot is
+    what the lossless halving handles.
+    """
+    return int(cap_mb * 8 * 1024 / max(seconds, 0.1))
 
 
 def _probe_manifest(directory: Path) -> Path | None:
@@ -393,10 +416,10 @@ def split_video(video_path: Path, tmp_dir: Path, segment_duration: int = 60) -> 
             # and a keyframe every eighth puts a cut on the midpoint of the
             # first two split levels.
             size_mb = seg_path.stat().st_size / (1024 * 1024)
+            seg_len = end - start
             if size_mb > settings.video_max_mb:
-                seg_len = end - start
                 compressed = stage / "compressed.mp4"
-                target_bitrate = int(settings.video_max_mb * 8 * 1024 / segment_duration)
+                target_bitrate = _target_bitrate_kbps(settings.video_max_mb, seg_len)
                 subprocess.run(
                     [
                         "ffmpeg",
@@ -489,7 +512,7 @@ def prepare_video_for_upload(video_path: Path, tmp_dir: Path, max_mb: int = 20) 
         if size_mb > max_mb:
             upload_dur = _get_duration(upload)
             compressed = stage / "compressed.mp4"
-            target_bitrate = int(max_mb * 8 * 1024 / max_dur)  # kbps
+            target_bitrate = _target_bitrate_kbps(max_mb, upload_dur)  # kbps
             subprocess.run(
                 [
                     "ffmpeg",
