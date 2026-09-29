@@ -6,6 +6,7 @@ visual style, spatial layout, and gameplay mechanics.
 """
 
 import logging
+import re
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -782,7 +783,11 @@ def rewrite_design(design: GameDesign, instruct: str | None) -> GameDesign:
             f"Design re-skin failed ({e}) — stopping before the redraw stage rather "
             "than shipping a source-faithful design"
         ) from e
-    rewritten.dialogue_samples = design.dialogue_samples  # transcript authority, not the model's
+    # Transcript authority, not the model's — and a copy of it: the speaker
+    # relabelling below mutates these entries, and the stage-1 design is still
+    # live (the pipeline diffs it for asset-key renames, and a second themed run
+    # would otherwise inherit the first theme's names).
+    rewritten.dialogue_samples = [ds.model_copy() for ds in design.dialogue_samples]
 
     # One-to-one structure: renames ride along, but a collapse/merge/split is
     # a failed re-skin — entity counts are keys downstream.
@@ -962,7 +967,9 @@ def _merge_designs(designs: list[GameDesign]) -> GameDesign:
     if len(designs) == 1:
         return designs[0]
 
-    base = designs[0].model_copy()
+    # Deep copy: the merge below absorbs, appends to and extends these lists,
+    # and a shallow copy would write all of that back into designs[0].
+    base = designs[0].model_copy(deep=True)
 
     # ── Merge characters by identity (face), not just name ───────────────
     merged_chars: list[Character] = list(base.characters)
@@ -1064,16 +1071,28 @@ _FEATURE_KEYWORDS = {
     "distinguishing": ["tattoo", "piercing", "mask", "hood", "cape", "crown", "eye patch"],
 }
 
+# One word-boundary pattern per keyword: a plain substring test read "hundred"
+# as red hair, "bold" as old and "instant" as tanned skin, and those phantom
+# features then pulled unrelated characters together in the cast merge. The
+# optional suffix keeps real descriptions matching — including the doubled
+# final consonant English adds before "-ed" ("scarred", "tanned") — without
+# reopening the substring hole.
+_FEATURE_RE = {
+    kw: re.compile(rf"(?<![a-z]){re.escape(kw)}{re.escape(kw[-1])}?(?:s|es|ed|d|ing)?(?![a-z])")
+    for keywords in _FEATURE_KEYWORDS.values()
+    for kw in keywords
+}
+
 
 def _extract_features(text: str) -> set[str]:
     """Extract visual feature keywords from a description string."""
-    words = text.lower().split()
-    features: set[str] = set()
-    for category, keywords in _FEATURE_KEYWORDS.items():
-        for kw in keywords:
-            if kw in words or kw in text.lower():
-                features.add(f"{category}:{kw}")
-    return features
+    lowered = text.lower()
+    return {
+        f"{category}:{kw}"
+        for category, keywords in _FEATURE_KEYWORDS.items()
+        for kw in keywords
+        if _FEATURE_RE[kw].search(lowered)
+    }
 
 
 def _name_similarity(a: str, b: str) -> float:
@@ -1181,12 +1200,13 @@ def _absorb_character(existing: Character, incoming: Character) -> None:
     if len(incoming.relationships) > len(existing.relationships):
         existing.relationships = incoming.relationships
 
-    # Merge abilities
-    existing_set = set(existing.abilities)
-    for a in incoming.abilities:
-        if a.lower() not in {x.lower() for x in existing_set}:
-            existing.abilities.append(a)
-            existing_set.add(a)
+    # Merge abilities — compared case-insensitively so "Fireball" and "fireball"
+    # do not both survive as separate entries.
+    seen_abilities = {a.lower() for a in existing.abilities}
+    for ability in incoming.abilities:
+        if ability.lower() not in seen_abilities:
+            existing.abilities.append(ability)
+            seen_abilities.add(ability.lower())
 
     # Keep richer face_id
     if not existing.face_id and incoming.face_id:
