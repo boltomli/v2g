@@ -83,7 +83,9 @@ assets), and stage 3 only reads what stages 1 and 2 produced.
 Extracts keyframe images and sends them to the LLM.
 - Short video (<5 min): fixed-interval extraction (1 frame per `V2G_FRAME_INTERVAL` seconds).
 - Long video (≥5 min): **scene-detect** extraction — ffmpeg identifies frames where visuals change
-  significantly. Adapts threshold to stay within `V2G_FRAME_BUDGET` (default 40 frames).
+  significantly. Adapts threshold to stay within `V2G_FRAME_BUDGET` (default 40 frames); each
+  retry re-decodes the whole video, so a pass that does not shed frames ends the sweep and the
+  evenly-spaced fallback takes over from there.
 - Works with any multimodal model (GPT-4o, Claude 3.5, Gemini, etc.)
 - Lower token cost, faster analysis
 
@@ -93,10 +95,13 @@ Sends the full video file directly to a video-capable LLM.
 - Short video (≤ `V2G_CHUNK_DURATION` + 30 s — 90 s at defaults): single upload, trimmed to
   `V2G_MAX_DURATION` when longer, compressed at most once, then losslessly
   split by duration until every file fits `V2G_VIDEO_MAX_MB` (the cap is hard — compression
-  output is verified, never assumed)
+  output is verified, never assumed). The compression bitrate is budgeted over the clip's
+  **own** length, never over `V2G_MAX_DURATION` or the nominal chunk size: sizing a 30 s clip
+  as if it filled a 120 s window spends a quarter of the bitrate the cap already allows.
 - **Long video (beyond that): automatic chunked analysis** — splits into `V2G_CHUNK_DURATION`-second
-  segments (default 60 s each); each segment is compressed at most once, and any segment
-  still over `V2G_VIDEO_MAX_MB` is halved losslessly (stream copy, no re-encode) until it fits.
+  segments (default 60 s each); each segment is compressed at most once (same bitrate rule, over
+  that segment's real length — the trailing one is usually short), and any segment still over
+  `V2G_VIDEO_MAX_MB` is halved losslessly (stream copy, no re-encode) until it fits.
   Analyzes each segment separately, then merges results.
   Characters are deduplicated (most detailed version kept), scenes concatenated, mechanics unioned.
 - Produces richer design: object behaviors, physics rules, spatial layouts, progression
@@ -268,6 +273,14 @@ still fails (`game_manager.gd` → template, unreferenced extras dropped), then
 runs Godot headless twice (import scan, then a boot) — missing assets or
 script errors surface at **generation time**.
 
+The story and asset maps `vn_manager.gd` embeds are GDScript *literals*, and
+GDScript resolves escapes before the engine ever sees the text — so the JSON is
+escaped for the literal (backslashes, then quotes). Without that pass, one ASCII
+quote anywhere in the transcript made `JSON.parse_string` return null and the
+game booted to the empty-story card with nothing logged; `_gd_const` is the one
+place that escaping happens, and a regression test parses the generated file
+with Godot itself.
+
 ### Asset extraction
 
 After LLM analysis, the pipeline extracts visual assets from the source video,
@@ -302,7 +315,10 @@ a sprite. Stills keep the bars: they are part of the video.
      subject small"): asking "is it visible?" on thumbnails came back empty
      for every sprite.
    - **Locate** — a sprite's ranked pick is then checked at full size; that
-     answer carries the bounding box the crop is taken from. Stills ship
+     answer carries the bounding box the crop is taken from. It is the one
+     vision call made at high image detail (`chat(detail="high")`), because a
+     `"low"` 512 px thumbnail cannot resolve a small prop's edges; the contact
+     sheets and the many-frame analysis stay on the cheap path. Stills ship
      straight from the pick (they are never cropped).
    A refusal falls through to the next ranked pick; when nothing qualifies
    (or every pick is taken) the first candidate ships anyway with a warning,
