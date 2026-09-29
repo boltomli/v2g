@@ -288,13 +288,16 @@ still fails (`game_manager.gd` → template, unreferenced extras dropped), then
 runs Godot headless twice (import scan, then a boot) — missing assets or
 script errors surface at **generation time**.
 
-The story and asset maps `vn_manager.gd` embeds are GDScript *literals*, and
+Every JSON constant `vn_manager.gd` embeds (`STORY_JSON`, `TEX_JSON`,
+`PORTRAIT_JSON`, `SPEAKER_JSON`, `SFX_JSON`) is a GDScript *literal*, and
 GDScript resolves escapes before the engine ever sees the text — so the JSON is
 escaped for the literal (backslashes, then quotes). Without that pass, one ASCII
 quote anywhere in the transcript made `JSON.parse_string` return null and the
 game booted to the empty-story card with nothing logged; `_gd_const` is the one
 place that escaping happens, and a regression test parses the generated file
-with Godot itself.
+with Godot itself. `BGM_RES` is the exception: it is a plain string literal
+rather than embedded JSON, and `json.dumps` output is already valid GDScript
+for it.
 
 ### Asset extraction
 
