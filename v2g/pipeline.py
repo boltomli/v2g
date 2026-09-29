@@ -20,6 +20,9 @@ from v2g.llm.analyzer import (
     rewrite_design,
     save_checkpoint,
 )
+from v2g.music import generate_music
+from v2g.sfx import build_sfx
+from v2g.tts import build_synth
 from v2g.video.asset_extractor import extract_assets, probe_video_size
 from v2g.video.dialogue import TranscriptLine, extract_dialogue, format_transcript
 from v2g.video.extractor import extract, prepare_video_for_upload, resolve_source, split_video
@@ -192,12 +195,62 @@ def run(
     restyle_assets(design, assets, instruct)
     log.log(runlog.NOTICE, "Stage 2: re-skin + redraw done (style: %.80s)", design.style or "-")
 
-    # ── Stage 3: generate the game flow and copy ────────────────────────────
+    # ── Stage 3: voice-over + music + sound effects, then generate ──────────
+    # Voice design derives from the *rewritten* design: stage-2 renames would
+    # otherwise leave speaker keys pointing at voices derived from old names.
+    synth = build_synth(run_dir, design)
+    if synth is not None:
+        console.print(f"[bold cyan]▶ Voice-over:[/] {settings.tts_model} ({settings.tts_text})")
+    if settings.music_model.strip():
+        provider = (settings.music_provider or "api").strip().lower()
+        if provider == "acestep":
+            console.print(
+                f"[bold cyan]▶ Background music (local ACE-Step at "
+                f"{settings.music_acestep_url})...[/]"
+            )
+        elif provider == "llm":
+            console.print("[bold cyan]▶ Background music (LLM writes the synth code)...[/]")
+        else:
+            console.print("[bold cyan]▶ Background music...[/]")
+    bgm = generate_music(design, instruct, run_dir)
+    if settings.sfx_provider.strip():
+        console.print("[bold cyan]▶ Sound effects (cue derivation)...[/]")
+    sfx = build_sfx(run_dir, design)
+
     console.print("[bold cyan]▶ Generating Godot project...[/]")
-    project_path = generate(design, run_dir, assets=assets, video_size=video_size)
+    project_path = generate(
+        design,
+        run_dir,
+        assets=assets,
+        video_size=video_size,
+        tts=synth,
+        bgm=bgm,
+        sfx=sfx,
+    )
     console.print(
         f"  [bold green]✓[/] Project created at [link=file://{project_path}]{project_path}[/link]"
     )
     log.log(runlog.NOTICE, "Project created at %s", project_path)
+
+    if synth is not None:
+        if synth.enabled:
+            state = f"{synth.voiced} line(s) voiced"
+        else:
+            state = f"disabled after an error ({synth.voiced} line(s) voiced)"
+        console.print(f"  Voice-over: {state} via {settings.tts_model}")
+        log.log(runlog.NOTICE, "Voice-over: %s (%s)", state, settings.tts_model)
+    if bgm:
+        console.print(f"  BGM: {bgm}")
+    elif settings.music_model.strip():
+        console.print("  [yellow]BGM skipped — see v2g.log[/]")
+    if sfx is not None:
+        if sfx.enabled:
+            state = f"{sfx.generated} clip(s)"
+        else:
+            state = f"disabled after an error ({sfx.generated} clip(s) before the failure)"
+        console.print(f"  SFX: {state}")
+        log.log(runlog.NOTICE, "SFX: %s", state)
+    elif settings.sfx_provider.strip():
+        console.print("  [yellow]SFX off — see v2g.log[/]")
 
     return project_path

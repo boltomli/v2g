@@ -8,6 +8,8 @@ Strategy:
 4. Write project.godot (advance input only), game_design.json, and scripts.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -17,12 +19,17 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from v2g.config import settings
 from v2g.godot import templates as T
 from v2g.llm import jsonfix
 from v2g.llm.analyzer import GameDesign, SceneDesign, safe_name
 from v2g.llm.client import chat
+
+if TYPE_CHECKING:
+    from v2g.sfx import Sfx
+    from v2g.tts import Synthesizer
 
 log = logging.getLogger(__name__)
 
@@ -684,10 +691,16 @@ def _ensure_essentials(
     scripts: dict[str, str],
     design: GameDesign,
     assets: dict[str, Path] | None = None,
+    *,
+    tts: Synthesizer | None = None,
+    bgm: str | None = None,
+    sfx: Sfx | None = None,
 ) -> dict[str, str]:
     """Ensure essential scripts exist; fill missing ones from templates.
 
-    - vn_manager.gd is ALWAYS template-owned (it embeds the bilingual story).
+    - vn_manager.gd is ALWAYS template-owned (it embeds the bilingual story,
+      the per-step voice-over paths from *tts*, the *sfx* event map and cues,
+      and the *bgm* track).
     - game_manager.gd must keep the score_changed/add_score contract the VN
       runtime wires to; anything else falls back to the template.
     """
@@ -697,7 +710,7 @@ def _ensure_essentials(
             log.warning("game_manager.gd lacks the score_changed contract — using template")
         scripts["game_manager.gd"] = T.game_manager_script(design)
 
-    scripts["vn_manager.gd"] = T.vn_manager_script(design, assets)
+    scripts["vn_manager.gd"] = T.vn_manager_script(design, assets, synth=tts, bgm=bgm, sfx=sfx)
     return scripts
 
 
@@ -707,6 +720,9 @@ def generate(
     *,
     assets: dict[str, Path] | None = None,
     video_size: tuple[int, int] | None = None,
+    tts: Synthesizer | None = None,
+    bgm: str | None = None,
+    sfx: Sfx | None = None,
 ) -> Path:
     """Stage 3: create the Godot project — game flow and copy — and return its path.
 
@@ -740,7 +756,7 @@ def generate(
     # 1. Generate ALL scripts via LLM
     log.info("Generating GDScript files via LLM...")
     scripts = _generate_scripts(design)
-    scripts = _ensure_essentials(scripts, design, assets)
+    scripts = _ensure_essentials(scripts, design, assets, tts=tts, bgm=bgm, sfx=sfx)
     log.info("Generated %d script(s): %s", len(scripts), ", ".join(sorted(scripts)))
 
     # 2. project.godot — window aspect follows the source video

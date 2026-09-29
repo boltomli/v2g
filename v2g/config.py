@@ -43,6 +43,24 @@ class Settings(BaseSettings):
     imagegen_max_side: int = 1024  # longest output edge — lower to save RAM/VRAM
     imagegen_ab: bool = False  # draw text-only AND reference candidates per asset, judge picks one
 
+    # Text-to-speech (voice-over for narration + dialogue) — trunk endpoint
+    tts_model: str = ""  # "" = off | /audio/speech model (e.g. gpt-4o-mini-tts, tts-1)
+    tts_voices: str = ""  # comma-separated override; "" = API default voices (first = narration)
+    tts_text: str = "zh"  # "zh" = speak line_zh | "source" = verbatim line, fallback line_zh
+
+    # Background music + sound effects — chat-completions audio on the trunk endpoint
+    music_model: str = ""  # "" = off | chat model for audio (api) / DiT selection (acestep)
+    music_provider: str = (
+        "api"  # "api" = chat audio | "llm" = model writes synth code | "acestep" = local REST
+    )
+    music_acestep_url: str = (
+        "http://127.0.0.1:8001"  # acestep provider: a running acestep-api base URL
+    )
+    music_duration: int = 60  # seconds per track (10–600; folded into the prompt / REST param)
+    sfx_provider: str = (
+        ""  # "" = off | "llm" = the text model writes the synth scripts (run locally)
+    )
+
     # Output
     output_root: Path = Path("projects")
 

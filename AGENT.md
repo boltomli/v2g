@@ -16,8 +16,9 @@ project, in **three stages that only ever flow forwards**:
    assets are redrawn beside their frames. If the re-skin fails the run stops
    here — a source-faithful design is never redrawn or shipped.
 3. **Generate the game flow and copy** — the Godot project: script flow,
-   dialogue, choices, HUD. Voice-over and background music are **planned but
-   not implemented yet**.
+   dialogue, choices, HUD, plus optional audio: per-line voice-over (TTS), a
+   loopable background track and sound effects — all off by default, and
+   none can fail a run.
 
 ```
 Video (file / URL)
@@ -51,7 +52,7 @@ Video (file / URL)
 ┌ Stage 3 ─ generate the game flow and copy ─────────────────────────────────┐
 │  Godot Project Generator (visual novel)                                    │
 │    └─ script check + repair, import, headless boot (self-check)            │
-│  voice-over / background music: planned, not implemented yet               │
+│  voice-over (TTS) + BGM + sound effects: all optional, off by default      │
 └────────────────────────────────────┬───────────────────────────────────────┘
                                      ▼
                           projects/<run-id>/         (fresh directory per run)
@@ -68,7 +69,10 @@ Video (file / URL)
                           │   ├── background.png
                           │   ├── char_*.png
                           │   ├── obj_*.png
-                          │   └── scene_*.png
+                          │   ├── scene_*.png
+                          │   ├── voice/           ← voice-over clips (V2G_TTS_MODEL set)
+                          │   ├── bgm/bgm.mp3      ← loopable track (V2G_MUSIC_MODEL set)
+                          │   └── sfx/             ← event + cue clips (V2G_SFX_PROVIDER set)
                           └── game_design.json
 ```
 
@@ -142,6 +146,14 @@ refetched; a fresh malformed response is never re-requested.
 | `V2G_CHUNK_DURATION` | `60` | Seconds per analysis chunk (detail mode; must be ≤ `V2G_MAX_DURATION`) |
 | `V2G_ASSET_VERIFY` | `1` | Vision model must confirm each extracted frame shows its asset (`0` = extract unchecked) |
 | `V2G_VIDEO_MAX_MB` | `20` | Max upload size in MB per chunk |
+| `V2G_TTS_MODEL` | — | Voice-over model; `/audio/speech` first (preset voices), documented chat protocol for voice-design models and as fallback (e.g. `gpt-4o-mini-tts`, `mimo-v2.5-tts`, `mimo-v2.5-tts-voicedesign`); unset = off |
+| `V2G_TTS_VOICES` | API defaults | Preset mode: comma-separated voices; the first speaks narration and sets chat-audio `audio.voice`, characters rotate the rest. Ignored for voice-design models (voices are derived from the design) |
+| `V2G_TTS_TEXT` | `zh` | Spoken text: `zh` = Chinese line (default), `source` = verbatim transcript line, falling back to Chinese |
+| `V2G_MUSIC_MODEL` | — | Background music model: chat audio (`api`), the code-writing text model (`llm`), or the DiT id (`acestep`); unset = off |
+| `V2G_MUSIC_PROVIDER` | `api` | `api` = OpenAI chat-audio; `llm` = the text model writes the synth code (works with no music model, executes model-written Python); `acestep` = local ACE-Step REST |
+| `V2G_MUSIC_ACESTEP_URL` | `http://127.0.0.1:8001` | A running `acestep-api` for the `acestep` provider — start/stop it yourself |
+| `V2G_MUSIC_DURATION` | `60` | BGM length in seconds (10–600) |
+| `V2G_SFX_PROVIDER` | — | Sound-effects backend; `llm` = the text model writes one synthesis script per cue, run locally (model-written Python, same machinery as the BGM `llm` provider); unset or unknown = off |
 
 ## Language & dialogue contract
 
@@ -257,13 +269,16 @@ class DialogueChoice:
 |---|---|---|
 | `project.godot` | template | Engine config, window size matching the source video's aspect (ffprobe; 1280x720 fallback), `advance` input (Space/Enter) |
 | `main.tscn` | template | Visual-novel root: `Control` (vn_manager.gd) + `GameManager` |
-| `vn_manager.gd` | template | VN runtime: embedded bilingual story, dialogue box (source line + Chinese subtitle), choices, portraits, background flashes, restart |
+| `vn_manager.gd` | template | VN runtime: embedded bilingual story, dialogue box (source line + Chinese subtitle), choices, portraits, background flashes, restart, per-step voice-over, loopable BGM, event/cue sound effects |
 | `game_manager.gd` | LLM | Game state honoring the `score_changed`/`add_score` contract (template fallback) |
 | `*.gd` (extras) | LLM | Optional extras: alliance map, minigames, audio, save/load |
 | `assets/background.png` | ffmpeg | Representative frame from video midpoint — untouched frame, source aspect |
 | `assets/char_*.png` | ffmpeg | Character sprites — 512×512 half-body squares, shot-pooled across the video, hash-checked byte-distinct, model-verified |
 | `assets/obj_*.png` | ffmpeg | Object sprites (collectibles, weapons, etc.) — 512×512 squares, model-verified |
 | `assets/scene_*.png` | ffmpeg | Additional scene backgrounds for multi-scene videos — untouched frames, source aspect |
+| `assets/voice/<hash>.*` | TTS endpoint | Voice-over clips, one per story line (mp3); the story embeds their paths |
+| `assets/bgm/bgm.mp3` | music endpoint | Loopable background track (only when `V2G_MUSIC_MODEL` is set) |
+| `assets/sfx/*.mp3` | local synthesis (LLM-written scripts) | `select` / `transition` event clips plus per-line cue clips (only when `V2G_SFX_PROVIDER` is set) |
 | `game_design.json` | analyzer | Full design document as project metadata |
 
 After writing files, the generator compile-checks every script with
@@ -501,6 +516,115 @@ To implement a new provider: subclass `ImageGenProvider` in
 `v2g/llm/image_gen.py`, implement `transform()` and `is_available()`, then
 wire it into the `get_provider()` factory.
 
+### Stage 3 audio: voice-over + background music + sound effects
+
+All three layers are **optional, off by default, and can never fail a run**
+— a failure downgrades to a warning and the line/track/clip ships without
+audio.
+
+**Voice-over** (`v2g/tts.py`) — synthesizes the narration, every dialogue
+line and the title card; the end card and choice options are never spoken.
+
+- Backend: the trunk endpoint with the model from `V2G_TTS_MODEL`
+  (**unset = off**), two protocols (`v2g.audio_api`):
+  `POST <V2G_LLM_BASE_URL>/audio/speech` first for preset-voice models, and
+  the **documented chat-TTS protocol** `chat_speech` — text on the
+  `assistant` turn, optional style/voice description on the `user` turn,
+  `audio.voice` for preset ids. `chat_speech` is the *only* path for
+  voice-design models and the fallback when `/audio/speech` is missing
+  (some gateways serve TTS only through chat completions). Zero new
+  dependencies; which vendor serves the model is the user's routing concern.
+  To support another backend, subclass `TTSProvider` and wire it into
+  `build_synth` — the rest of the pipeline only ever sees a `Synthesizer`.
+- Text: `V2G_TTS_TEXT=zh` (default) speaks `line_zh`; `source` speaks the
+  verbatim transcript line and falls back to Chinese.
+- Voices — two assignment modes:
+  - **preset** (`V2G_TTS_VOICES`, default = the endpoint's standard list):
+    the first voice is the narrator **and** sets chat-audio `audio.voice`,
+    every speaker rotates the rest in first-appearance order (stable within
+    a run).
+  - **voice design** (model id contains `voicedesign`, e.g.
+    `mimo-v2.5-tts-voicedesign`): one cached LLM call derives a 1–2
+    sentence voice description per speaker from the finished design —
+    narrator plus every character, keyed exactly like the story's speaker
+    keys (:func:`v2g.llm.analyzer.speaker_key`) — so each role and the
+    narrator get a distinct, personality-fitting voice. The description
+    rides the `user` turn; `audio.voice` is omitted (the endpoint 400s on
+    an id: `audio.voice is not supported for voice design model`). A failed
+    derivation falls back to one default description, never to preset ids.
+    `V2G_TTS_VOICES` is ignored in this mode.
+- Synthesis happens inside `_build_story` — the single place that knows
+  which steps are voiceable. Each clip lands in `assets/voice/<hash>.*` and
+  the step gains a `voice` key; clips are content-addressed in
+  `.v2g_cache/tts/` (gated by `V2G_MEDIA_CACHE`), so reruns make zero calls.
+- Failure taxonomy: endpoint-wide problems (no key, dead endpoint) warn
+  **once** and disable voice-over for the rest of the run; a bad line drops
+  only that line's audio.
+- Runtime: a `Voice` `AudioStreamPlayer` plays on `_show_step` and stops on
+  advance/choice — skipping a line cuts its audio.
+
+**Background music** (`v2g/music.py` + `v2g/audio_api.py`) — one loopable mp3
+built from `atmosphere` + `style` + the stage-2 theme, closing with an
+"instrumental, no vocals" mandate (the VN speaks over the track).
+
+- Default backend (`V2G_MUSIC_PROVIDER=api`): **OpenAI chat-audio format** —
+  `POST <V2G_LLM_BASE_URL>/chat/completions` with `model`
+  (`V2G_MUSIC_MODEL`, **unset = off**), `messages`,
+  `modalities: ["text", "audio"]` and `audio: {format: "mp3", voice: ...}`;
+  the track comes back as `choices[0].message.audio.data` (base64). Length
+  and the instrumental mandate travel in the prompt text, so the body stays
+  a valid OpenAI request; response parsing also tolerates the
+  OpenRouter/ACE-Step `audio_url` shapes (data URI or URL, non-mp3
+  normalized through ffmpeg). The model id routes the call; which backend
+  serves it is the user's routing concern.
+- Local alternative (`V2G_MUSIC_PROVIDER=acestep`): a **running** local
+  `acestep-api` at `V2G_MUSIC_ACESTEP_URL` speaking its own REST protocol —
+  `POST /release_task` (with `audio_duration`, empty `lyrics`, optional DiT
+  `model`) → poll `POST /query_result` → `GET /v1/audio`. Starting and
+  stopping that server is the user's job; v2g only talks to it.
+- Codegen alternative (`V2G_MUSIC_PROVIDER=llm`): the **text model writes
+  the music** — one cached chat call returns a self-contained Python script
+  (exact duration/sample rate in the spec, numpy when available, stdlib
+  otherwise), kept at `<run>/work/bgm_llm/bgm_llm.py`, executed as
+  `python -I` with a 180 s timeout in that directory, then ffmpeg → mp3.
+  Works on any trunk that has no music model. **This executes model-written
+  code** — only point it at an endpoint you trust; failures (syntax,
+  timeout, bad output) degrade to "no music", never a failed run.
+- Why not MIDI: rendering needs an external synthesizer (fluidsynth/timidity
+  plus a soundfont, none of which ship here) — the codegen path renders
+  audio directly instead; MIDI support can be added when a renderer exists.
+- Track → `assets/bgm/bgm.mp3`, cached in `.v2g_cache/music/` with the same
+  content addressing. The runtime loops it (`AudioStreamMP3.loop`) at −6 dB
+  under the voice-over, from start to restart.
+- Endpoint unreachable, task failed, or the response carries no audio (a
+  plain text model behind the model id) → NOTICE in `v2g.log`, project
+  ships without music.
+
+**Sound effects** (`v2g/sfx.py`) — two layers, one **local** generator:
+
+- Fixed event prompts (`select` = 清脆的电子提示音, `transition` = 快速掠过的
+  嗖声); per-line cues come from **ONE cached LLM call** deriving short
+  Chinese **sound descriptions** (沉闷的关门声 / 哗哗的大雨 / 急促的脚步声,
+  cap 8 non-empty, `""` = silence, cut at 40 characters) — stage 3 reads
+  stages 1/2 only, so no schema or analyzer prompt changes; malformed
+  answers pad/truncate to the script length or fall back to event sounds
+  only.
+- Cues are **descriptions of sounds to render, never text to speak**: for
+  each clip the chat model writes a self-contained synthesis script
+  (`v2g.codegen`, the BGM `llm` provider's machinery — the prompt forbids
+  speech outright), the script runs isolated (`python -I`, 60 s timeout) in
+  `work/sfx_llm/` where its source stays for inspection, and ffmpeg turns
+  the WAV into the clip. No audio endpoint is involved, so a cue cannot
+  come back as a voice.
+- Backend: `V2G_SFX_PROVIDER=llm` enables it (the chat model is
+  `V2G_LLM_MODEL`); unset or an unknown value = SFX off. Clips land in
+  `assets/sfx/` and cache in `.v2g_cache/sfx/`. The story embeds each cue
+  path per step and `SFX_JSON` carries the event map. The failure taxonomy
+  mirrors voice-over: a chat failure warns **once** and disables SFX for
+  the run, a bad script drops only that clip — and a bad script served
+  from the response cache is invalidated and refetched once (the
+  `_request_design` policy), so a fluke never sticks across reruns.
+
 ### Scene tree (main.tscn)
 
 The scene is a minimal, template-owned visual-novel root:
@@ -521,7 +645,9 @@ Generated projects are starting points. Open in Godot 4.x and iterate:
 1. Edit the story in `vn_manager.gd`'s `STORY_JSON` (or change `game_design.json` and regenerate)
 2. Add choice branches / minigames as extra LLM scripts around the VN runtime
 3. Wire `game_manager.gd` goals to win/lose and the alliance map
-4. Add audio based on `style` and `atmosphere` descriptions
+4. Swap `assets/bgm/bgm.mp3` (or regenerate it — set `V2G_MUSIC_MODEL` to a
+   music-capable backend; the prompt comes from `atmosphere`, `style` and
+   the stage-2 theme)
 
 ## Dependencies
 
