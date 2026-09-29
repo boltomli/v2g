@@ -53,6 +53,18 @@ def test_key_is_content_addressed_across_run_dirs(tmp_path):
     assert _key([a]) != _key([b])
 
 
+def test_vision_detail_is_part_of_the_key_without_invalidating_old_ones(tmp_path):
+    """The image token budget changes the request, so it must change the key —
+    but every response cached before the parameter existed was a "low" call and
+    has to keep resolving, or a rerun would re-pay for the whole analysis."""
+    a = tmp_path / "frame.png"
+    a.write_bytes(b"png-bytes")
+
+    implicit = _key([a])  # no detail passed = the historical default
+    assert implicit == _key([a], detail="low")
+    assert implicit != _key([a], detail="high")
+
+
 def test_media_entry_is_content_addressed_and_respects_toggle(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "output_root", tmp_path)
     work = tmp_path / "work"

@@ -50,25 +50,33 @@ def key_for(
     parts: list[str | Path],
     max_tokens: int,
     temperature: float,
+    detail: str = "low",
 ) -> str:
-    """Deterministic key for one exact chat request."""
+    """Deterministic key for one exact chat request.
+
+    *detail* is how many vision tokens each image part buys, so it changes the
+    request and belongs in the key. It is recorded only when it leaves the
+    default: every request predating the parameter sent ``"low"``, and keying it
+    explicitly would invalidate every cached response in ``.v2g_cache/`` — a
+    rerun would re-pay for the whole analysis. Injective either way, since only
+    the new ``"high"`` callers can produce the second form.
+    """
 
     def part_key(part: str | Path) -> list[str]:
         if isinstance(part, Path):
             return ["file", _file_digest(part)]
         return ["text", part]
 
-    material = json.dumps(
-        {
-            "model": model,
-            "system": system,
-            "parts": [part_key(p) for p in parts],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        },
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    material: dict[str, object] = {
+        "model": model,
+        "system": system,
+        "parts": [part_key(p) for p in parts],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if detail != "low":
+        material["detail"] = detail
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def get(key: str) -> str | None:

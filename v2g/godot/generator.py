@@ -345,7 +345,16 @@ def _frame_caption(path: Path) -> str:
         "of the subject and must never appear in your description."
     )
     try:
-        res = chat(_CAPTION_SYSTEM, [ask, path], temperature=0.0, max_tokens=_VISION_TOKENS)
+        res = chat(
+            _CAPTION_SYSTEM,
+            [ask, path],
+            temperature=0.0,
+            max_tokens=_VISION_TOKENS,
+            # The caption decides what the redraw brief says the subject IS, so
+            # it is worth the full-size image: one call per asset, next to the
+            # minutes of local image generation it steers.
+            detail="high",
+        )
     except Exception as e:  # noqa: BLE001 — a caption enriches the brief, it never gates it
         log.info("imagegen: no source-frame caption (%s) — brief alone", e)
         return ""
@@ -537,7 +546,10 @@ def restyle_assets(
     failures = 0
     with _candidates_dir(settings.imagegen_ab) as cand_dir:
         modes = (("ref", True), ("text", False)) if cand_dir else (("ref", True),)
-        for key, path in list(assets.items()):
+        for index, (key, path) in enumerate(list(assets.items()), start=1):
+            # One asset is minutes of local generation — without a per-asset line
+            # the console shows nothing at all between "Restyling" and the end.
+            log.log(runlog.NOTICE, "  redraw %d/%d: %s", index, len(assets), key)
             brief = _redraw_prompt(design, key, style)
             # ref candidate: the brief stays binding and the frame enters as
             # text first (caption) — i2t2i, with the image as a reference.

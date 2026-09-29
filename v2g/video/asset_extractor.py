@@ -37,8 +37,10 @@ from pathlib import Path
 
 from v2g.config import settings
 from v2g.llm import jsonfix
-from v2g.llm.analyzer import GameDesign, GameObject, SceneDesign
+from v2g.llm.analyzer import GameDesign, GameObject, SceneDesign, safe_name
 from v2g.llm.client import chat
+from v2g.runlog import NOTICE
+from v2g.video.extractor import _get_duration
 
 log = logging.getLogger(__name__)
 
@@ -121,26 +123,6 @@ def _parse_spatial_hint(hint: str) -> tuple[float, float, float, float]:
         y, h = 0.15, 0.7
 
     return x, y, w, h
-
-
-def _get_video_duration(video_path: Path) -> float:
-    """Return video duration in seconds."""
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(video_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return float(result.stdout.strip())
 
 
 def probe_video_size(video_path: Path) -> tuple[int, int] | None:
@@ -749,8 +731,13 @@ class _Verifier:
         self.enabled = enabled
         self._down = False
 
-    def _ask(self, prompt: str, image: Path) -> dict | None:
-        """One verified chat round; None = no verdict (off, failed, unusable)."""
+    def _ask(self, prompt: str, image: Path, *, detail: str = "low") -> dict | None:
+        """One verified chat round; None = no verdict (off, failed, unusable).
+
+        *detail* is raised to ``"high"`` by :meth:`locate`: that answer carries
+        the crop box, and a 512 px ``"low"`` thumbnail cannot resolve the edges
+        of a small prop in a wide shot.
+        """
         if not self.enabled or self._down:
             return None
         try:
@@ -763,6 +750,7 @@ class _Verifier:
                 # silently turned the gate off for that frame, and 1000 was
                 # eaten whole on the longer prompts too.
                 max_tokens=_VERIFY_TOKENS,
+                detail=detail,
             )
             data = jsonfix.salvage(res.text)
         except Exception as e:  # noqa: BLE001 — an outage must never fail extraction
@@ -795,7 +783,7 @@ class _Verifier:
         """``(found, subject box)`` for one full-size frame; None = no verdict."""
         if not target.subject.strip():
             return None
-        data = self._ask(_verify_prompt(target), image)
+        data = self._ask(_verify_prompt(target), image, detail="high")
         if data is None:
             return None
         if not isinstance(data.get("found"), bool):
@@ -963,7 +951,7 @@ def extract_assets(
     verifier = _Verifier(settings.asset_verify if verify is None else verify)
 
     try:
-        duration = _get_video_duration(video_path)
+        duration = _get_duration(video_path)
     except (subprocess.CalledProcessError, ValueError) as e:
         log.warning("Cannot get video duration: %s — skipping asset extraction", e)
         return assets
@@ -980,7 +968,28 @@ def extract_assets(
             cuts = _shot_boundaries(video_path, settings.scene_threshold)
         return _shot_pool(duration, cuts, cell, seed)
 
+    # Each asset costs a dozen frame cuts plus up to three vision calls — long
+    # enough that a silent console reads as a hang. Work out the full list first
+    # so the counter is exact, then announce every item as it starts.
+    characters = [c for c in design.characters if "narrator" not in _role_tokens(c.role)]
+    key_objects = [o for o in design.objects if _role_tokens(o.role) & _KEY_OBJECT_ROLES]
+    in_frame_objects = []
+    for obj in key_objects:
+        if _is_ui_only(obj):
+            log.info("Object '%s' lives in the UI, not in any video frame — skipping", obj.name)
+        else:
+            in_frame_objects.append(obj)
+    scene_stills = list(enumerate(design.scenes[1:], start=1))  # first scene = background
+    total = 1 + len(characters) + len(in_frame_objects) + len(scene_stills)
+    done = 0
+
+    def announce(label: str) -> None:
+        nonlocal done
+        done += 1
+        log.log(NOTICE, "  asset %d/%d: %s", done, total, label)
+
     # ── 1. Background: frame from the middle of the video ────────────────────
+    announce("background")
     bg_target = _Target(
         "background",
         _scene_text(design.scenes[0]) if design.scenes else "",
@@ -1002,11 +1011,9 @@ def extract_assets(
         log.warning("Failed to extract background")
 
     # ── 2. Character sprites (512×512 half-body portraits) ───────────────────
-    characters = [c for c in design.characters if "narrator" not in _role_tokens(c.role)]
     for char in characters:
-        safe_name = (
-            "".join(c if c.isalnum() or c in "-_" else "_" for c in char.name).strip("_").lower()
-        )
+        key = safe_name(char.name)
+        announce(f"character '{char.name}'")
         seed = zlib.crc32(char.name.encode("utf-8"))
         spatial_hint = ""
         # Try to find spatial hints from related objects
@@ -1020,7 +1027,7 @@ def extract_assets(
             f"{char.name} ({char.role}): {char.visual}",
             region=region,
         )
-        final = out_dir / f"char_{safe_name}.png"
+        final = out_dir / f"char_{key}.png"
         accepted = _capture_distinct(
             video_path,
             out_dir,
@@ -1031,20 +1038,15 @@ def extract_assets(
             verifier=verifier,
         )
         if accepted:
-            assets[f"characters/{safe_name}"] = final
+            assets[f"characters/{key}"] = final
             log.info("Extracted character '%s' sprite", char.name)
         else:
             log.warning("Character '%s': no frame could be extracted", char.name)
 
     # ── 3. Object sprites (512×512 squares) ──────────────────────────────────
-    key_objects = [o for o in design.objects if _role_tokens(o.role) & _KEY_OBJECT_ROLES]
-    for obj in key_objects:
-        safe_name = (
-            "".join(c if c.isalnum() or c in "-_" else "_" for c in obj.name).strip("_").lower()
-        )
-        if _is_ui_only(obj):
-            log.info("Object '%s' lives in the UI, not in any video frame — skipping", obj.name)
-            continue
+    for obj in in_frame_objects:
+        key = safe_name(obj.name)
+        announce(f"object '{obj.name}'")
         region = _parse_spatial_hint(obj.spatial) if obj.spatial else None
         seed = zlib.crc32(obj.name.encode("utf-8"))
         cell: tuple[float, float] | None = None
@@ -1066,7 +1068,7 @@ def extract_assets(
             f"{obj.name} ({obj.role}): {obj.visual}",
             region=region,
         )
-        final = out_dir / f"obj_{safe_name}.png"
+        final = out_dir / f"obj_{key}.png"
         accepted = _capture_distinct(
             video_path,
             out_dir,
@@ -1077,17 +1079,16 @@ def extract_assets(
             verifier=verifier,
         )
         if accepted:
-            assets[f"objects/{safe_name}"] = final
+            assets[f"objects/{key}"] = final
             log.info("Extracted object '%s' sprite", obj.name)
         else:
             log.warning("Object '%s': no frame could be extracted", obj.name)
 
     # ── 4. Scene backgrounds (first scene gets the main background) ──────────
-    for i, scene in enumerate(design.scenes[1:], start=1):  # skip first (already have background)
-        safe_name = (
-            "".join(c if c.isalnum() or c in "-_" else "_" for c in scene.name).strip("_").lower()
-        )
-        bg_path = out_dir / f"scene_{safe_name}.png"
+    for i, scene in scene_stills:
+        key = safe_name(scene.name)
+        announce(f"scene '{scene.name}'")
+        bg_path = out_dir / f"scene_{key}.png"
         accepted = _capture_distinct(
             video_path,
             out_dir,
@@ -1101,7 +1102,7 @@ def extract_assets(
             verifier=verifier,
         )
         if accepted:
-            assets[f"scenes/{safe_name}"] = bg_path
+            assets[f"scenes/{key}"] = bg_path
             log.info("Extracted scene background '%s'", scene.name)
         else:
             log.warning("Failed to extract scene '%s'", scene.name)

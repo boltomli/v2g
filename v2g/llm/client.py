@@ -31,8 +31,15 @@ def _to_data_url(path: Path) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def _file_to_content(path: Path) -> dict:
-    """Build the appropriate content block for an image or video file."""
+def _file_to_content(path: Path, detail: str) -> dict:
+    """Build the appropriate content block for an image or video file.
+
+    *detail* is the vision token budget for image parts: ``"low"`` downscales to
+    a fixed 512 px (cheap, and enough for the many-frame analysis pass and the
+    contact sheets), ``"high"`` sends tiles up to the model's maximum — worth it
+    on the single-frame calls whose answer is a bounding box or a caption.
+    Video parts carry no detail field.
+    """
     suffix = path.suffix.lower()
     if suffix in (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"):
         return {
@@ -42,7 +49,7 @@ def _file_to_content(path: Path) -> dict:
     # Default to image
     return {
         "type": "image_url",
-        "image_url": {"url": _to_data_url(path), "detail": "low"},
+        "image_url": {"url": _to_data_url(path), "detail": detail},
     }
 
 
@@ -68,6 +75,7 @@ def chat(
     max_tokens: int | None = None,
     temperature: float = 0.4,
     refresh: bool = False,
+    detail: str = "low",
 ) -> ChatResult:
     """Send a multimodal chat request, served from the response cache when possible.
 
@@ -76,6 +84,8 @@ def chat(
       budget — analysis modes — pass their own value)
     - refresh=True skips the cache read (used when a cached answer proved
       invalid) and overwrites the stored entry with the fresh answer.
+    - detail sets the image token budget ("low"/"high"); raise it only for calls
+      whose answer depends on fine detail (a bounding box, a frame caption).
     - Unusable output (finish=length, content_filter) is never cached.
     """
     if max_tokens is None:
@@ -86,6 +96,7 @@ def chat(
         parts=user_parts,
         max_tokens=max_tokens,
         temperature=temperature,
+        detail=detail,
     )
     if not refresh:
         hit = cache.get(key)
@@ -96,7 +107,7 @@ def chat(
     content: list[dict] = []
     for part in user_parts:
         if isinstance(part, Path):
-            content.append(_file_to_content(part))
+            content.append(_file_to_content(part, detail))
         else:
             content.append({"type": "text", "text": part})
 
